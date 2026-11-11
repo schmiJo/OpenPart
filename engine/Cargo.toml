@@ -1,0 +1,22 @@
+[package]
+name = "schmishape-engine"
+description = "CoreShape's tool layer and display meshes, behind a plain C ABI for the browser"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+coreshape = { path = "../../core_shape/crates/kernel" }
+coreshape-document = { path = "../../core_shape/crates/document" }
+coreshape-mcp = { path = "../../core_shape/crates/mcp" }
+
+[workspace]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
