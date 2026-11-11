@@ -5,6 +5,7 @@ import { booted, doc, setAsideAutosave } from '../store/doc';
 import { bootTabs, inAssembly, tabManagerOpen } from '../store/tabs';
 import { dismissToast, glProblem, mode, toast, toasts } from '../store/ui';
 import { FeatureDialog } from './FeatureDialog';
+import { AppearanceDialog } from './Appearance';
 import { Palette } from './Palette';
 import { AssemblyPanels, Features, Parts, Variables } from './Sidebar';
 import { Shortcuts } from './Shortcuts';
@@ -48,6 +49,7 @@ export function App() {
         <div class="stage">
           <Viewport />
           <FeatureDialog />
+          <AppearanceDialog />
           <Show when={booted() && !inAssembly() && doc.features.length === 0 && mode() === 'part' && !glProblem()}>
             <div class="empty" data-testid="empty">
               <p>Right-click a plane to create a sketch.</p>

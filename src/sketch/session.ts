@@ -4,7 +4,8 @@ import { doc, numberOr } from '../store/doc';
 import { snapsOn, toast } from '../store/ui';
 import type { Camera } from '../viewport/camera';
 import { bareExpression, defaultPlace, dimValueText, fmt, layoutDimension, SIGNED } from './dimension';
-import { arcPoints, ccw, circleThrough, crossings, angleOf, closestOnEntity, dist2, pointsOf, polyline, toLocal, toWorld, type Con, type Ent, type Plane, type SketchData, type V2 } from './geometry';
+import { cornerOf, isPartCorner, isPartEdge, isPartRef, partIndex, type PartGeometry } from './parts';
+import { arcPoints, ccw, circleThrough, crossings, angleOf, closestOnEntity, dist2, drawn, isProjected, pointsOf, polyline, toLocal, toWorld, type Con, type Ent, type Plane, type SketchData, type V2 } from './geometry';
 
 export type Tool = 'select' | 'line' | 'rect' | 'rect-center' | 'circle' | 'circle-3pt' | 'arc' | 'arc-center' | 'arc-tangent' | 'spline' | 'point' | 'trim' | 'sketch-fillet' | 'dimension';
 
@@ -50,6 +51,22 @@ type Draft =
 export interface LabelRect { key: string; x: number; y: number; w: number; h: number }
 
 const POINT_HIT = 9;
+/** How many picks a constraint tool takes before it knows they can't make that constraint. */
+const CONSTRAINT_PICKS: Record<string, number> = { symmetric: 3, fix: 1 };
+/** What each constraint tool takes, for when the picks don't fit. */
+export const CONSTRAINT_NEEDS: Record<string, string> = {
+  coincident: 'Coincident takes two points, or a point and a curve',
+  horizontal: 'Horizontal takes a line, or two points',
+  vertical: 'Vertical takes a line, or two points',
+  parallel: 'Parallel takes two lines',
+  perpendicular: 'Perpendicular takes two lines',
+  equal: 'Equal takes two lines, or two circles or arcs',
+  tangent: 'Tangent takes a line and a curve, or two curves',
+  concentric: 'Concentric takes two circles or arcs',
+  midpoint: 'Midpoint takes a point and a line',
+  symmetric: 'Symmetric takes two points, then the line they mirror about',
+  fix: 'Fix takes a point, a line, a circle or an arc',
+};
 const EDGE_HIT = 7;
 
 export const isConstraintKey = (s: string) => s.startsWith('c');
@@ -68,6 +85,8 @@ export class SketchSession {
 
   readonly tool = createSignal<Tool>('line');
   readonly selection = createSignal<string[]>([]);
+  /** A constraint tool waiting for its picks, as Onshape's wait when nothing that suits them was selected first. */
+  readonly constraintTool = createSignal<string | null>(null);
   readonly analysis = createSignal<Analysis>({ dof: 0, free: [], redundant: [] });
   readonly editing = createSignal<{ id: number; x: number; y: number; text: string; fresh: boolean } | null>(null);
   readonly canUndo = createSignal(false);
@@ -89,6 +108,15 @@ export class SketchSession {
   readonly constructing = createSignal(false);
   private dragBusy = false;
   private dragNext: V2 | null = null;
+  /** The corners and edges of the parts before this sketch, to pick while the select tool is out. */
+  part: PartGeometry | null = null;
+  /** What the view has under a point on screen, which knows what's hidden behind a face. */
+  pickModel: ((sx: number, sy: number) => { kind: string; id: number } | null) | null = null;
+  /**
+   * Where the sketch sits, for the kernel to put geometry projected from a part: its plane, and its place in the history,
+   * so only what comes before it counts.
+   */
+  context: { plane: unknown; position: number } | null = null;
 
   constructor(
     public readonly featureId: number | null,
@@ -122,7 +150,16 @@ export class SketchSession {
     return this.enqueue(async () => this.data);
   }
 
-  entity = (id: number) => this.data.entities.find((e) => e.id === id);
+  /** An entity as it's drawn and measured. One projected from a part is the line, arc or point it projects to. */
+  entity = (id: number) => {
+    const e = this.data.entities.find((x) => x.id === id);
+    return e ? drawn(e) : undefined;
+  };
+
+  /** The sketch tools need to know where the sketch is once it has anything projected from a part in it. */
+  private where() {
+    return this.context && this.data.entities.some((e) => e.type === 'projected') ? { context: this.context } : {};
+  }
   screen = (p: V2) => this.camera.project(toWorld(this.plane, p));
   local(sx: number, sy: number): V2 {
     const w = this.camera.onPlane(sx, sy, this.plane.origin, this.plane.z);
@@ -146,7 +183,7 @@ export class SketchSession {
   }
 
   private async solve(): Promise<{ ok: boolean; message?: string }> {
-    const r = await engine.call('sketch_solve', { sketch: this.data, parameters: { ...doc.env } });
+    const r = await engine.call('sketch_solve', { sketch: this.data, parameters: { ...doc.env }, ...this.where() });
     if (!r.ok) {
       let message = r.text;
       try { message = JSON.parse(r.text).message; } catch { /* It wasn't structured, so say it as it came. */ }
@@ -159,7 +196,7 @@ export class SketchSession {
   }
 
   private async refreshRegions() {
-    const r = await engine.call('sketch_arrangement', { sketch: this.data });
+    const r = await engine.call('sketch_arrangement', { sketch: this.data, ...this.where() });
     this.regions = r.ok ? JSON.parse(r.text).regions : [];
   }
 
@@ -175,6 +212,16 @@ export class SketchSession {
     this.data.next_constraint = this.nextConstraint;
   }
 
+  /** Any part corner or edge a constraint names becomes the linked entity it means, so it follows the part. */
+  private resolveLinks(d: SketchData) {
+    for (const c of d.constraints) {
+      for (const k of Object.keys(c) as (keyof Con)[]) {
+        const v = c[k];
+        if (typeof v === 'string' && isPartRef(v)) (c as any)[k] = this.linkTo(v, d) ?? v;
+      }
+    }
+  }
+
   /** A change the solver has to accept, or it's taken back with the reason. */
   change(edit: (d: SketchData) => void, opts: { refuseRedundant?: string } = {}): Promise<boolean> {
     return this.enqueue(async () => {
@@ -182,6 +229,7 @@ export class SketchSession {
       const redundantBefore = this.analysis[0]().redundant.length;
       const analysisBefore = this.analysis[0]();
       edit(this.data);
+      this.resolveLinks(this.data);
       this.stampIds();
       const res = await this.solve();
       const refuse = !res.ok ? res.message! : opts.refuseRedundant && this.analysis[0]().redundant.length > redundantBefore ? opts.refuseRedundant : null;
@@ -205,6 +253,7 @@ export class SketchSession {
     return this.enqueue(async () => {
       const before = JSON.stringify(this.data);
       edit(this.data);
+      this.resolveLinks(this.data);
       this.stampIds();
       const res = await this.solve();
       if (!res.ok) {
@@ -217,6 +266,8 @@ export class SketchSession {
         const known = this.analysis[0]().redundant.length;
         const kept = JSON.stringify(this.data);
         this.data.constraints.push(c);
+        this.resolveLinks(this.data);
+        this.stampIds();
         const r = await this.solve();
         if (!r.ok || this.analysis[0]().redundant.length > known) {
           this.data = JSON.parse(kept);
@@ -295,6 +346,13 @@ export class SketchSession {
     consider('origin', [0, 0]);
     for (const e of this.data.entities) for (const { ref, p } of pointsOf(e)) consider(ref, p);
     if (best) return best;
+
+    // A part's corner, as Onshape snaps to it: what's drawn there stays on it, wherever the part goes.
+    const corner = this.partHit(sx, sy, true);
+    if (corner && isPartCorner(corner)) {
+      const c = this.part!.corners[partIndex(corner)];
+      if (c) return { p: toLocal(this.plane, c.p), ref: corner };
+    }
 
     // Middles of lines.
     bestD = POINT_HIT - 1;
@@ -417,6 +475,27 @@ export class SketchSession {
   }
 
   /** What's under the pointer: a dimension or glyph, then a point, then an edge. */
+  setPart(g: PartGeometry | null) {
+    this.part = g;
+    this.invalidate();
+  }
+
+  /** A part's corner or edge under the pointer, if it can be seen there. A corner is an end of an edge close by. */
+  private partHit(sx: number, sy: number, anyTool = false): string | null {
+    if ((!anyTool && this.tool[0]() !== 'select') || !this.part || !this.pickModel) return null;
+    const h = this.pickModel(sx, sy);
+    const e = h?.kind === 'edge' ? this.part.edges[h.id] : null;
+    if (!e || !e.pts.length) return null;
+    if (!e.closed) {
+      for (const p of [e.start, e.end]) {
+        const q = this.camera.project(p);
+        const corner = Math.hypot(q[0] - sx, q[1] - sy) < POINT_HIT ? cornerOf(this.part, p) : null;
+        if (corner !== null) return `pv${corner}`;
+      }
+    }
+    return `pe${h!.id}`;
+  }
+
   hit(sx: number, sy: number): string | null {
     for (const l of this.labels) if (sx >= l.x && sx <= l.x + l.w && sy >= l.y && sy <= l.y + l.h) return l.key;
     let best: string | null = null;
@@ -429,6 +508,9 @@ export class SketchSession {
     for (const e of this.data.entities) for (const { ref, p } of pointsOf(e)) consider(ref, p);
     consider('origin', [0, 0]);
     if (best) return best;
+    // The sketch's own points come first, then a part's corners, then the sketch's curves, then a part's edges.
+    const part = this.partHit(sx, sy);
+    if (part && isPartCorner(part)) return part;
     let edgeD = EDGE_HIT;
     const raw = this.local(sx, sy);
     for (const e of this.data.entities) {
@@ -440,6 +522,7 @@ export class SketchSession {
       if (d < edgeD) { edgeD = d; best = String(e.id); }
     }
     if (best) return best;
+    if (part) return part;
     const k = this.camera.worldPerPixel * 5;
     if (Math.abs(raw[0]) < k) return 'y_axis';
     if (Math.abs(raw[1]) < k) return 'x_axis';
@@ -807,6 +890,15 @@ export class SketchSession {
   }
 
   pointerDown(sx: number, sy: number, shift: boolean) {
+    // With a constraint tool on, each click picks one thing for it, and nothing gets dragged or boxed.
+    if (this.constraintTool[0]()) {
+      const h = this.hit(sx, sy);
+      if (h && !isConstraintKey(h)) {
+        this.toggleSelect(h, true);
+        this.tryConstraint();
+      }
+      return;
+    }
     const tool = this.tool[0]();
     this.free = shift && tool !== 'select';
     switch (tool) {
@@ -827,7 +919,8 @@ export class SketchSession {
           else this.draft = { kind: 'dimdrag', id: conIdOf(h), press: [sx, sy], moved: false, editOnClick: false };
           break;
         }
-        if (!isConstraintKey(h) && h !== 'origin' && h !== 'x_axis' && h !== 'y_axis') {
+        // A part's corners and edges, and what's projected from them, stay where the part puts them.
+        if (!isConstraintKey(h) && !isPartRef(h) && !isProjected(this.entity(Number(h.split('.')[0]))) && h !== 'origin' && h !== 'x_axis' && h !== 'y_axis') {
           const grab = isPointRef(h) || this.entity(Number(h))?.type === 'point' ? h : { edge: Number(h) };
           this.draft = { kind: 'drag', grab, last: this.local(sx, sy), moved: false };
         }
@@ -1001,7 +1094,7 @@ export class SketchSession {
     }
     this.dragBusy = true;
     const grab = typeof d.grab === 'string' ? d.grab : { edge: d.grab.edge, at: d.last };
-    void engine.call('sketch_drag', { sketch: this.data, grab, to, parameters: { ...doc.env } }).then((r) => {
+    void engine.call('sketch_drag', { sketch: this.data, grab, to, parameters: { ...doc.env }, ...this.where() }).then((r) => {
       this.dragBusy = false;
       if (r.ok) {
         this.data = JSON.parse(r.text).sketch;
@@ -1045,6 +1138,7 @@ export class SketchSession {
     this.snap = null;
     this.trimming = null;
     this.hover = null;
+    this.constraintTool[1](null);
     this.tool[1](t);
     this.invalidate();
   }
@@ -1060,6 +1154,11 @@ export class SketchSession {
     if (this.draft) {
       if (this.draft.kind === 'spline') this.commitSpline();
       else this.draft = null;
+      return true;
+    }
+    if (this.constraintTool[0]()) {
+      this.constraintTool[1](null);
+      this.selection[1]([]);
       return true;
     }
     if (this.selection[0]().length) {
@@ -1111,7 +1210,7 @@ export class SketchSession {
   /** What the selection is made of, so the toolbar can offer only constraints that apply. */
   picks() {
     const keys = this.selection[0]().filter((k) => !isConstraintKey(k));
-    const points = keys.filter((k) => isPointRef(k) || this.entity(Number(k))?.type === 'point');
+    const points = keys.filter((k) => isPointRef(k) || isPartCorner(k) || this.entity(Number(k))?.type === 'point');
     const edges = keys.filter((k) => !points.includes(k));
     const lines = edges.filter((k) => k === 'x_axis' || k === 'y_axis' || this.entity(Number(k))?.type === 'line');
     const curves = edges.filter((k) => ['circle', 'arc'].includes(this.entity(Number(k))?.type ?? ''));
@@ -1167,14 +1266,80 @@ export class SketchSession {
     return null;
   }
 
-  addConstraint(type: string) {
+  /**
+   * A part's corner or edge as the sketch entity that links to it: one already in the sketch, or a new one, projected along
+   * the sketch's normal and kept there by the kernel as the part changes.
+   */
+  private linkTo(ref: string, d: SketchData, construction = true): string | null {
+    const g = this.part;
+    if (!g) return null;
+    const from = isPartCorner(ref) ? { vertex: g.corners[partIndex(ref)]?.vertex } : isPartEdge(ref) ? { edge: g.edges[partIndex(ref)]?.select } : null;
+    if (!from || Object.values(from)[0] === undefined) return null;
+    const key = JSON.stringify(from);
+    const have = d.entities.find((e) => e.type === 'projected' && JSON.stringify(e.from) === key && (e.construction !== false) === construction);
+    if (have) return String(have.id);
+    const id = this.nextEntity++;
+    d.entities.push({ id, type: 'projected', from, ...(construction ? {} : { construction: false }) } as Ent);
+    return String(id);
+  }
+
+  addConstraint(type: string, refused?: () => void) {
     const list = this.constraintsFor(type);
     if (!list) return;
     const made = list.map((c) => ({ ...c, id: this.nextConstraint++ }) as Con);
-    void this.change((d) => d.constraints.push(...made), { refuseRedundant: 'That is already held by other constraints.' }).then((ok) => {
+    // A part's corners and edges come in as linked entities as the change goes in, so the constraint follows the part.
+    void this.change((d) => {
+      d.constraints.push(...made);
+    }, { refuseRedundant: 'That is already held by other constraints.' }).then((ok) => {
+      if (ok) this.selection[1]([]);
+      else refused?.();
+    });
+  }
+
+  /**
+   * A constraint button or key. With what it needs already selected it's added at once. Otherwise the tool stays on and
+   * takes clicks, adding the constraint each time the picks make one, until Esc or another tool, as Onshape's does.
+   */
+  useConstraint(type: string) {
+    if (this.constraintsFor(type)) {
+      this.addConstraint(type);
+      return;
+    }
+    const keep = this.selection[0]().filter((k) => !isConstraintKey(k));
+    this.setTool('select');
+    this.constraintTool[1](type);
+    this.selection[1](keep);
+    this.invalidate();
+  }
+
+  /** In a constraint tool, after a pick: add the constraint if the picks make one, or start again if they can't. */
+  private tryConstraint() {
+    const type = this.constraintTool[0]();
+    if (!type) return;
+    if (this.constraintsFor(type)) {
+      this.addConstraint(type, () => this.selection[1]([]));
+      return;
+    }
+    const picked = this.selection[0]().filter((k) => !isConstraintKey(k));
+    if (picked.length >= (CONSTRAINT_PICKS[type] ?? 2)) {
+      toast(`${CONSTRAINT_NEEDS[type] ?? 'Those can’t take that constraint'}.`);
+      this.selection[1](picked.slice(-1));
+    }
+  }
+
+  /** Onshape's Use: the part's edges and corners selected come into the sketch as its own curves, still following the part. */
+  useSelection() {
+    const refs = this.selection[0]().filter(isPartRef);
+    if (!refs.length) return;
+    void this.change((d) => {
+      for (const ref of refs) this.linkTo(ref, d, false);
+    }).then((ok) => {
       if (ok) this.selection[1]([]);
     });
   }
+
+  /** Whether Use has anything to bring in. */
+  canUse = () => this.selection[0]().some(isPartRef);
 
   /** The dimension for what's picked, measured from the geometry as it stands. */
   measureFor(a: string, b: string | null, cursor?: V2): Omit<Con, 'id'> | null {

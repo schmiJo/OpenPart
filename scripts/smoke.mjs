@@ -329,13 +329,15 @@ console.log('constraint buttons');
 await page.keyboard.press('v');
 const [offX, offY] = await toScreen(110, 90);
 await clickAt(offX, offY);
-const lineCircleEnabled = async (type) => page.$eval(`[data-constraint=${type}]`, (e) => !e.disabled);
-check('nothing selected, no constraint offered', !(await lineCircleEnabled('horizontal')));
+// Every button can be clicked, as in Onshape. What the selection decides is whether a click adds it at once or waits for picks.
+const fitsNow = async (type) => page.evaluate((t) => !!window.schmishape.session().constraintsFor(t), type);
+check('the constraint buttons can always be clicked', await page.$$eval('[data-constraint]', (b) => b.every((x) => !x.disabled)));
+check('nothing selected, no constraint fits yet', !(await fitsNow('horizontal')));
 const [lx, ly] = await toScreen(15, 0);
 await clickAt(lx, ly);
 await wait(60);
-check('one line offers horizontal', await lineCircleEnabled('horizontal'));
-check('one line offers no parallel', !(await lineCircleEnabled('parallel')));
+check('one line fits horizontal', await fitsNow('horizontal'));
+check('one line doesn’t fit parallel yet', !(await fitsNow('parallel')));
 await page.keyboard.press('Escape');
 await page.keyboard.press('Delete');
 await finish();
@@ -370,7 +372,7 @@ await shot('23-revolve');
 await overlayClean('after a revolve');
 s = await docState();
 const shownRows = await page.$$eval('.feature-row', (r) => r.map((x) => x.querySelector('.feature-name').textContent));
-check('the axis helper stays out of the history', shownRows.length === 2 && s.features.length === 3, shownRows.join(', '));
+check('a revolve needs no hidden axis sketch', shownRows.length === 2 && s.features.length === 2, shownRows.join(', '));
 
 console.log('edit a sketch through a revolve');
 await page.$eval('.feature-row[data-index="0"]', (e) => e.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
@@ -491,7 +493,7 @@ await wait(250);
 await finish();
 await cmd('extrude');
 await settle(400);
-await page.$$eval('.dialog-tabs button', (b) => b.find((x) => x.textContent === 'Remove').click());
+await page.$$eval('[aria-label=Result] button', (b) => b.find((x) => x.textContent === 'Remove').click());
 await settle(250);
 await page.$eval('[data-testid=dialog] .field-flip', (e) => e.click());
 await settle(350);
@@ -1279,9 +1281,11 @@ await mut({ type: 'sketch', plane: { origin: [0, 0, 30] }, regions: [{ outer: { 
 await settle(300);
 await cmd('loft');
 await settle(350);
-const sketchIds = await page.$$eval('[data-sketch]', (b) => b.map((x) => Number(x.dataset.sketch)));
-check('loft lists the sketches', sketchIds.length === 2, `${sketchIds}`);
-for (const id of sketchIds) { await page.$eval(`[data-sketch="${id}"]`, (e) => e.click()); await settle(200); }
+// As in Onshape, the profiles are clicked in order: here the sketches in the feature list.
+const sketchIds = await page.evaluate(() => window.schmishape.doc.features.filter((f) => f.type === 'sketch').map((f) => f.id));
+for (const id of sketchIds) { await page.$eval(`.feature-row[data-feature="${id}"]`, (e) => e.click()); await settle(200); }
+const profiles = await page.$$eval('[data-pick=sections] .pick-name', (n) => n.map((x) => x.textContent));
+check('clicking the sketches in the list adds them in order', profiles.length === 2 && /^1\. /.test(profiles[0]) && /^2\. /.test(profiles[1]), JSON.stringify(profiles));
 await settle(400);
 await fitIso();
 await shot('85-loft');

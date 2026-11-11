@@ -1,6 +1,6 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { fitView, setView } from '../commands';
-import { activeDef, addPicks, addRegions, applyPickMask, canonical, pickAxisLine, pickBase, pickKey, pickKind, pickLimit, previewBase, showingFinal, startFeature, takesRegions, togglePick, toggleRegion, values } from '../features/dialog';
+import { activeDef, addPicks, addRegions, applyPickMask, canonical, flatFace, pickAxisLine, regionPicksShown, regionsTakeFaces, toggleSection, pickBase, pickKey, pickKind, pickLimit, previewBase, showingFinal, startFeature, takesRegions, togglePick, toggleRegion, values } from '../features/dialog';
 import { axisJson } from '../features/defs';
 import { edgeWord, faceWord, fmtNum } from '../features/words';
 import { cancelSketch, editSketch, finishSketch, looksAtSketch, normalTo, session, startSketch, visibleSketches } from '../sketch/controller';
@@ -8,10 +8,10 @@ import { PLANES, planeFromPlacement, planeOnFace, polyline, toWorld, type Plane,
 import { drawSketch } from '../sketch/overlay';
 import { sketchLines, type RegionPick, type SketchRegion } from '../sketch/regions';
 import type { MeshData } from '../engine/client';
-import { doc, edgeList, faceList, flushAutosave, mesh, sketchRegions, type EdgeInfo, type FaceInfo } from '../store/doc';
+import { doc, edgeList, faceList, flushAutosave, mesh, partLooks, sketchRegions, type EdgeInfo, type FaceInfo } from '../store/doc';
 import { asmBox, asmClick, asmDown, asmHover, asmMenu, asmMove, asmUp, drawAssemblyOverlay, noteAsmShift } from '../assembly/interaction';
 import { inAssembly } from '../store/tabs';
-import { clearSelection, geometryHidden, glProblem, hiddenParts, hoverPlane, mode, selectedFeature, selectedGeometry, selectedRegions, selection, setGlProblem, setHiddenParts, setHoverPlane, setHoverText, setMode, setSelectedFeature, setSelectedGeometry, setSelectedPart, setSelectedRegions, setSelection, sketchesHidden, toggleGeometry, togglePlanes } from '../store/ui';
+import { lookPreview, clearSelection, geometryHidden, glProblem, hiddenParts, hoverPlane, mode, selectedFeature, selectedGeometry, selectedRegions, selection, setGlProblem, setHiddenParts, setHoverPlane, setHoverText, setMode, setSelectedFeature, setSelectedGeometry, setSelectedPart, setSelectedRegions, setSelection, sketchesHidden, toggleGeometry, togglePlanes } from '../store/ui';
 import { FONT } from '../viewport/font';
 import { view } from '../viewport/instance';
 import { Renderer, type PickHit } from '../viewport/renderer';
@@ -139,6 +139,12 @@ function surfaceHit(m: MeshData | null, renderer: Renderer, x: number, y: number
   const normal = normalize([w * nor[a] + bu * nor[b] + bv * nor[c], w * nor[a + 1] + bu * nor[b + 1] + bv * nor[c + 1], w * nor[a + 2] + bu * nor[b + 2] + bv * nor[c + 2]]);
   return { point: add(o, scale(d, best)), normal };
 }
+
+/** `#rrggbb` as three numbers from 0 to 1. */
+const hexColor = (hex: string): [number, number, number] | null => {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  return m ? [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255] : null;
+};
 
 const hiddenPartFaces = (m: MeshData) => [...hiddenParts()].flatMap((i) => m.parts[i]?.faces ?? []);
 
@@ -305,7 +311,12 @@ export function Viewport() {
       const key = pickKey();
       const faces = new Map<number, number>();
       const edges = new Map<number, number>();
-      if (base && key && pickKind() !== 'regions' && pickKind() !== 'axis') {
+      if (base && pickKind() === 'regions') {
+        const refs = new Set<string>(values.faces ?? []);
+        base.faces.forEach((f, i) => {
+          if (refs.has(f.name) || refs.has(f.key)) faces.set(i, 2);
+        });
+      } else if (base && key && pickKind() !== 'axis') {
         const v = values[key];
         const list: any[] = Array.isArray(v) ? v : v === null || v === undefined ? [] : [v];
         const kind = pickKind();
@@ -328,12 +339,15 @@ export function Viewport() {
       }
       const hoverPart = base && hit?.kind === 'face' && (pickKind() === 'part' || pickKind() === 'parts') ? base.mesh.parts.find((p) => p.faces.includes(hit.id)) : null;
       if (hoverPart) hoverPart.faces.forEach((i) => { if (!faces.has(i)) faces.set(i, 1); });
-      if (hit?.kind === 'face' && !faces.has(hit.id)) faces.set(hit.id, 1);
+      // A curved face can't be extruded, so it doesn't light up as if it could.
+      const unpickable = base && hit?.kind === 'face' && pickKind() === 'regions' && (!regionsTakeFaces() || !flatFace(base, hit.id));
+      if (hit?.kind === 'face' && !faces.has(hit.id) && !unpickable) faces.set(hit.id, 1);
       if (hit?.kind === 'edge' && !edges.has(hit.id)) edges.set(hit.id, 1);
       const parts = m?.parts ?? [];
       const hidden = [...hiddenParts()].filter((i) => parts[i]);
       renderer.setStates(faces, edges, hidden.flatMap((i) => parts[i].faces), hidden.flatMap((i) => parts[i].edges));
     });
+
 
     createEffect(() => {
       const lit = hoverPlane();
@@ -362,8 +376,13 @@ export function Viewport() {
     // Clicks go to whichever box in the dialog has the blue edge, so the view only offers what that box takes.
     createEffect(() => {
       activeDef();
-      pickKind();
+      const kind = pickKind();
       applyPickMask();
+      // What the pointer was over meant something to the box before, and may mean nothing now.
+      if (kind !== 'axis') {
+        setHoverLine(null);
+        setHoverText('');
+      }
     });
 
     createEffect(() => {
@@ -373,8 +392,27 @@ export function Viewport() {
       if (base) renderer.setPreviewBaseHidden(hidden.flatMap((i) => base.parts[i]?.faces ?? []), hidden.flatMap((i) => base.parts[i]?.edges ?? []));
     });
 
+    // After the meshes are made, so a new one gets its colors.
+    // Each part in its own color, if it has one, on the model and on the model under a see-through preview.
+    createEffect(() => {
+      const looks = partLooks();
+      const trying = lookPreview();
+      const colorsOf = (md: MeshData | null) => {
+        const out = new Map<number, [number, number, number]>();
+        for (const p of md?.parts ?? []) {
+          const hex = trying?.body === p.name ? trying.color : looks[p.name]?.color;
+          const rgb = hex ? hexColor(hex) : null;
+          if (rgb) for (const f of p.faces) out.set(f, rgb);
+        }
+        return out;
+      };
+      // Whatever remakes either mesh on the GPU wipes its colors, so this follows all of it.
+      hiddenParts();
+      renderer.setFaceColors(colorsOf(mesh()), colorsOf(previewBase()));
+    });
+
     // A used sketch stays on show while it's chosen in a dialog, or while one of its regions is selected.
-    const alsoShown = (): (number | null | undefined)[] => (activeDef() ? [values.sketch, ...((values.regions ?? []) as RegionPick[]).map((p) => p.sketch)] : [selectedRegions()?.sketch]);
+    const alsoShown = (): (number | null | undefined)[] => (activeDef() ? [values.sketch, ...regionPicksShown().map((p) => p.sketch)] : [selectedRegions()?.sketch]);
 
     // The closed areas of those sketches, shaded and pickable. A dialog can only use what comes before it.
     createEffect(() => {
@@ -404,7 +442,7 @@ export function Viewport() {
     createEffect(() => {
       const list = shownRegions();
       const hit = hoverHit();
-      const picks: RegionPick[] = takesRegions() ? (values.regions ?? []) : (() => { const s = selectedRegions(); return s ? s.ids.map((id) => ({ sketch: s.sketch, id })) : []; })();
+      const picks: RegionPick[] = takesRegions() ? regionPicksShown() : (() => { const s = selectedRegions(); return s ? s.ids.map((id) => ({ sketch: s.sketch, id })) : []; })();
       const states = new Map<number, number>();
       list.forEach((r, i) => {
         if (picks.some((p) => p.sketch === r.sketch && p.id === r.region.id)) states.set(i, 2);
@@ -569,6 +607,12 @@ export function Viewport() {
     if (pickKind() === 'regions') {
       const r = hit?.kind === 'region' ? shownRegions()[hit.id] : null;
       if (r) toggleRegion(r.sketch, r.region.id);
+      else if (hit?.kind === 'face') togglePick(hit);
+      return;
+    }
+    if (pickKind() === 'sections') {
+      const r = hit?.kind === 'region' ? shownRegions()[hit.id] : null;
+      if (r) toggleSection({ sketch: r.sketch, id: r.region.id });
       return;
     }
     if (activeDef()) {
@@ -697,6 +741,7 @@ export function Viewport() {
           { label: flat ? 'New sketch' : 'New sketch, touching here', keys: flat ? 'Shift S' : undefined, command: 'menu.sketch', disabled: !plane, run: () => startSketch(plane!) },
           { label: flat ? 'Normal to face' : 'Normal to surface here', keys: flat ? 'N' : undefined, disabled: !plane, run: () => normalTo(plane!) },
           null,
+          { label: 'Extrude', keys: 'Shift E', disabled: !flat, run: () => startFeature('extrude') },
           { label: 'Shell', run: () => startFeature('shell') },
           fit,
         ],
@@ -795,8 +840,15 @@ export function Viewport() {
   const selectInBox = (b: { x: number; y: number; w: number; h: number }, adding: boolean) => {
     if (inAssembly()) return asmBox(withinBox(mesh(), renderer, b), adding);
     const inside = regionsInBox(b);
-    if (pickKind() === 'regions') return addRegions(inside.map((r) => ({ sketch: r.sketch, id: r.region.id })));
-    if (pickKind() === 'axis') return;
+    if (pickKind() === 'regions') {
+      addRegions(inside.map((r) => ({ sketch: r.sketch, id: r.region.id })));
+      const base = pickBase();
+      const found = base ? withinBox(base.mesh, renderer, b) : null;
+      if (found) addPicks(found);
+      return;
+    }
+    // A loft's profiles go in the order they're clicked, which a box doesn't have.
+    if (pickKind() === 'axis' || pickKind() === 'sections') return;
     const base = pickBase();
     if (!base) {
       const cur = selectedRegions();

@@ -7,8 +7,12 @@ const curveWords: Record<string, string> = { line: 'Straight edge', circle: 'Rou
 export const faceWord = (surface?: string) => (surface && surfaceWords[surface]) || 'Curved face';
 export const edgeWord = (curve?: string) => (curve && curveWords[curve]) || 'Edge';
 
-/** What a part is called on screen: Part 2, or Surface 1 for a sheet, numbered by kind in the order they were made. */
-export function partLabel(parts: { name: string; sheet: boolean }[], name: string) {
+/**
+ * What a part is called on screen: the name given to it, or Part 2, or Surface 1 for a sheet, numbered by kind in the
+ * order they were made.
+ */
+export function partLabel(parts: { name: string; sheet: boolean }[], name: string, looks?: Record<string, { name?: string }>) {
+  if (looks?.[name]?.name) return looks[name].name!;
   const at = parts.findIndex((p) => p.name === name);
   if (at < 0) return name;
   const sheet = parts[at].sheet;

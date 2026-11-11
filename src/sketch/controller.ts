@@ -1,10 +1,10 @@
 import { batch, createSignal } from 'solid-js';
-import { doc, documentText, holdBar, insertPosition, isHidden, mutate, nextName, pushUndo, returnBar, setRollback, sketchRegions, ToolError, type HeldBar } from '../store/doc';
+import { partGeometry } from './parts';
+import { doc, documentText, edgeList, mesh, holdBar, insertPosition, isHidden, mutate, nextName, pushUndo, returnBar, setRollback, sketchRegions, ToolError, type HeldBar } from '../store/doc';
 import { clearSelection, selectedFeature, setHoverPlane, setMode, setSelectedFeature, sketchesHidden, toast } from '../store/ui';
 import { view } from '../viewport/instance';
 import { loadPlaces, savePlaces } from './dimension';
 import { emptySketch, planeFromPlacement, placementOf, PLANES, type Plane, type SketchData } from './geometry';
-import { wholeSketch } from './regions';
 import { SketchSession } from './session';
 
 export const [session, setSession] = createSignal<SketchSession | null>(null);
@@ -14,7 +14,19 @@ export function startSketch(plane: Plane) {
   if (!r) return;
   const name = nextName('Sketch');
   const s = new SketchSession(null, plane, name, emptySketch(), r.camera, view.redraw, loadPlaces(null));
+  s.context = { plane: placementOf(plane), position: insertPosition() };
   enter(s);
+  void loadParts(s);
+}
+
+/**
+ * A part's corners and edges to pick while sketching. The view shows the model as it stood before the sketch, so they're
+ * read from the view's own model, numbered as its edges are for picking.
+ */
+async function loadParts(s: SketchSession) {
+  s.pickModel = (x, y) => view.renderer?.pick(x, y) ?? null;
+  const g = partGeometry(await edgeList(), mesh());
+  if (session() === s) s.setPart(g);
 }
 
 /** Entering a sketch only swaps the toolbar. The camera and the model stay exactly as they were. */
@@ -57,8 +69,11 @@ export function editSketch(id: number) {
   const plane = planeFromPlacement(f.plane, doc.env);
   const data: SketchData = JSON.parse(JSON.stringify(f.sketch));
   heldBar = holdBar();
-  enter(new SketchSession(id, plane, f.name, data, view.renderer.camera, view.redraw, loadPlaces(id)));
-  void setRollback(doc.features.findIndex((x) => x.id === id));
+  const s = new SketchSession(id, plane, f.name, data, view.renderer.camera, view.redraw, loadPlaces(id));
+  s.context = { plane: f.plane, position: doc.features.findIndex((x) => x.id === id) };
+  enter(s);
+  // Once the model has gone back to how it stood at this sketch, that's what there is to pick.
+  void setRollback(doc.features.findIndex((x) => x.id === id)).then(() => loadParts(s));
 }
 
 function leave() {
@@ -122,7 +137,7 @@ export function visibleSketches(alsoShow: (number | null | undefined)[] = []) {
   };
   doc.features.forEach((f, i) => {
     if (i > last) return;
-    if (Array.isArray(f.sections)) f.sections.forEach((x: number) => used.add(x));
+    if (Array.isArray(f.sections)) f.sections.forEach((x: any) => (typeof x === 'number' ? used.add(x) : x && pick(x.sketch, x.region)));
     if (Array.isArray(f.regions) && f.regions.length) {
       for (const r of f.regions) {
         if (typeof r === 'string') pick(f.sketch, r);
@@ -130,8 +145,9 @@ export function visibleSketches(alsoShow: (number | null | undefined)[] = []) {
       }
     } else if (typeof f.sketch === 'number') used.add(f.sketch);
   });
+  // Every region, holes too: a disc inside a ring is there to extrude until something has.
   for (const [id, ids] of picked) {
-    if (wholeSketch(sketchRegions().get(id)).every((r) => ids.has(r))) used.add(id);
+    if ((sketchRegions().get(id) ?? []).every((r) => ids.has(r.id))) used.add(id);
   }
   const chosen = selectedFeature();
   const also = new Set(alsoShow.filter((x): x is number => typeof x === 'number'));

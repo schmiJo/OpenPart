@@ -90,7 +90,7 @@ export async function viewNormal() {
 
 export const COMMANDS: Command[] = [
   { id: 'sketch', title: 'Sketch', icon: 'sketch', keys: 'Shift S', group: 'Model', enabled: inPart, run: beginSketch },
-  { id: 'extrude', title: 'Extrude', icon: 'extrude', keys: 'Shift E', group: 'Model', enabled: () => inPart() && hasSketch(), run: () => startFeature('extrude') },
+  { id: 'extrude', title: 'Extrude', icon: 'extrude', keys: 'Shift E', group: 'Model', enabled: () => inPart() && (hasSketch() || hasSolid()), run: () => startFeature('extrude') },
   { id: 'revolve', title: 'Revolve', icon: 'revolve', group: 'Model', enabled: () => inPart() && hasSketch(), run: () => startFeature('revolve') },
   { id: 'fillet', title: 'Fillet', icon: 'fillet', keys: 'G', group: 'Model', enabled: () => inPart() && hasSolid(), run: () => startFeature('fillet') },
   { id: 'chamfer', title: 'Chamfer', icon: 'chamfer', group: 'Model', enabled: () => inPart() && hasSolid(), run: () => startFeature('chamfer') },
@@ -222,8 +222,9 @@ export function handleKey(e: KeyboardEvent) {
       return;
     }
     if (key === 'q') return s.toggleConstruction();
-    if (key === 'h') return s.addConstraint('horizontal');
-    if (key === 'i') return s.addConstraint('vertical');
+    if (key === 'u') return s.useSelection();
+    if (key === 'h') return s.useConstraint('horizontal');
+    if (key === 'i') return s.useConstraint('vertical');
     if (key === 'f') return fitView();
     if (key === 'n') return looksAtSketch();
     return;

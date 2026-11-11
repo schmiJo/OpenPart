@@ -5,7 +5,7 @@ import { doc, documentText, holdBar, insertPosition, isHidden, isSketchFeature, 
 import type { MeshData } from '../engine/client';
 import { selectedFeature, selectedRegions, selection, setSelectedRegions, setSelection, setSelectedFeature, toast } from '../store/ui';
 import { view } from '../viewport/instance';
-import { defById, defForFeature, PICK_KINDS, regionsChosen, setHasBase, type FeatureDef, type FieldDef, type FieldKind, type Values } from './defs';
+import { defById, defForFeature, PICK_KINDS, regionsChosen, setHasBase, type FeatureDef, type FieldDef, type FieldKind, type Section, type Values } from './defs';
 
 export const [activeDef, setActiveDef] = createSignal<FeatureDef | null>(null);
 export const [values, setValues] = createStore<Values>({});
@@ -69,7 +69,7 @@ function followPickFields() {
 
 export const canonical = (v: unknown) => JSON.stringify(v);
 
-const regionField = (def: FeatureDef) => def.fields.find((f) => f.kind === 'regions');
+const regionField = (def: FeatureDef) => def.fields.find((f) => f.kind === 'regions' || f.kind === 'sections');
 /** The open dialog takes sketch regions, picked in the view or by a sketch in the list. */
 export const takesRegions = () => {
   const def = activeDef();
@@ -77,6 +77,20 @@ export const takesRegions = () => {
 };
 /** It takes regions and has none yet. */
 export const nothingPicked = () => takesRegions() && !regionsChosen(values);
+/** Its regions box takes a part's flat faces too. */
+export const regionsTakeFaces = () => {
+  const def = activeDef();
+  return !!def && !!def.fields.find((f) => f.kind === 'regions')?.takesFaces;
+};
+/** Every region the open dialog has picked, from its regions or a loft's profiles, for the view and the list to light. */
+export function regionPicksShown(): RegionPick[] {
+  const def = activeDef();
+  if (!def) return [];
+  if (def.fields.some((f) => f.kind === 'sections')) {
+    return ((values.sections ?? []) as Section[]).flatMap((x) => (x.id ? [{ sketch: x.sketch, id: x.id }] : wholeSketch(sketchRegions().get(x.sketch)).map((id) => ({ sketch: x.sketch, id }))));
+  }
+  return (values.regions ?? []) as RegionPick[];
+}
 /** What the feature still needs before it can be added, if anything. */
 export const dialogMissing = () => activeDef()?.missing?.(values) ?? null;
 /** Only what comes before this feature can be used by it. */
@@ -176,7 +190,8 @@ export function applyPickMask() {
   const kind = pickKind();
   const faces = kind === 'faces' || kind === 'face' || kind === 'part' || kind === 'parts';
   const edges = kind === 'edges' || kind === 'vertex';
-  r.pickMask = { faces, edges, planes: false, regions: kind === 'regions' };
+  // Extrude's box takes a part's flat faces as well as regions, as Onshape's does.
+  r.pickMask = { faces: faces || (kind === 'regions' && regionsTakeFaces() && !!pickBase()), edges, planes: false, regions: kind === 'regions' || kind === 'sections' };
   r.regionsOnTop = takesRegions();
   r.invalidate();
 }
@@ -208,7 +223,9 @@ export async function openDialog(defId: string, editId: number | null = null, pr
   setValues(reconcile(initial));
   setActiveDef(def);
   lastShown = new Set(pickFields(def).filter(shown).map((f) => f.key));
-  setActivePick(pickFields(def).find(shown)?.key ?? null);
+  // With its regions already there, as when a sketch was selected first, a revolve wants its axis next, as Onshape's does.
+  const axis = def.fields.find((f) => f.kind === 'axis');
+  setActivePick(axis && !existing && regionsChosen(initial) ? axis.key : pickFields(def).find(shown)?.key ?? null);
   applyPickMask();
   // As in Onshape, editing shows the model as it stood when this feature was made, with everything after it gone.
   if (existing) await setRollback(position);
@@ -219,6 +236,7 @@ export async function openDialog(defId: string, editId: number | null = null, pr
     if (takesModelPicks(def)) {
       view.renderer?.setPickMesh(snap.mesh);
       setPickBase({ faces: snap.faces, edges: snap.edges, mesh: snap.mesh });
+      applyPickMask();
     }
   }
   if (!existing) void applyPreview();
@@ -256,8 +274,26 @@ export function addRegions(found: { sketch: number; id: string }[]) {
   void applyPreview();
 }
 
-/** A sketch chosen in the list brings all of it, or takes it all out again if it's all in. */
+const sectionList = () => ((values.sections ?? []) as Section[]).map((x) => ({ ...x }));
+const sameSection = (a: Section, b: Section) => a.sketch === b.sketch && (a.id ?? null) === (b.id ?? null);
+
+/** A loft's profile, clicked in the view: added at the end, in the order they're clicked, or dropped if it's in. */
+export function toggleSection(section: Section) {
+  const list = sectionList();
+  // A region that's all its sketch makes is the same profile as the sketch.
+  const whole = wholeSketch(sketchRegions().get(section.sketch));
+  const matches = (x: Section) => sameSection(x, section) || (x.sketch === section.sketch && (!x.id || !section.id) && whole.length === 1 && whole[0] === (x.id ?? section.id));
+  const i = list.findIndex(matches);
+  setValue('sections', i >= 0 ? list.filter((_, at) => at !== i) : [...list, section]);
+}
+
+export function removeSection(at: number) {
+  setValue('sections', sectionList().filter((_, i) => i !== at));
+}
+
+/** A sketch chosen in the list brings all of it, or takes it all out again if it's all in. A loft takes it as one profile. */
 export function pickWholeSketch(sketch: number) {
+  if (activeDef()?.fields.some((f) => f.kind === 'sections')) return toggleSection({ sketch });
   const all = wholeSketch(sketchRegions().get(sketch)).map((id) => ({ sketch, id }));
   const list = regionPicks();
   const allIn = all.length > 0 && all.every((r) => list.some((p) => same(p, r)));
@@ -266,10 +302,25 @@ export function pickWholeSketch(sketch: number) {
   void applyPreview();
 }
 
-/** Empties the regions. A sketch with regions stays on show to pick from, and one without has nothing to keep it for. */
+/** Empties the regions and faces. A sketch with regions stays on show to pick from, and one without has nothing to keep it for. */
 export function clearRegions() {
-  setValues({ regions: [], sketch: sketchRegions().get(values.sketch)?.length ? values.sketch : null });
+  setValues({ regions: [], faces: [], sketch: sketchRegions().get(values.sketch)?.length ? values.sketch : null });
   void applyPreview();
+}
+
+/** Whether a face of the model before this feature is flat, which is what an extrude can take. */
+export const flatFace = (base: PickBase, i: number) => base.faces[i]?.surface === 'plane';
+
+/** A click on a flat face adds it to an extrude, or drops it if it's in. */
+function toggleFace(base: PickBase, i: number) {
+  const ref = flatFace(base, i) ? faceRef(base, i) : null;
+  if (!ref) return;
+  const list: string[] = [...(values.faces ?? [])];
+  setValue('faces', list.includes(ref) ? list.filter((x) => x !== ref) : [...list, ref]);
+}
+
+export function removeFace(ref: string) {
+  setValue('faces', ((values.faces ?? []) as string[]).filter((x) => x !== ref));
 }
 
 export function removeRegions(sketch: number, ids?: string[]) {
@@ -307,7 +358,9 @@ export function togglePick(hit: { kind: string; id: number }, end: 'start' | 'en
     const c = canonical(item);
     return list.some((x) => canonical(x) === c) ? list.filter((x) => canonical(x) !== c) : [...list, item];
   };
-  if (hit.kind === 'edge' && kind === 'edges') {
+  if (hit.kind === 'face' && kind === 'regions') {
+    if (regionsTakeFaces()) toggleFace(base, hit.id);
+  } else if (hit.kind === 'edge' && kind === 'edges') {
     const select = base.edges[hit.id]?.select;
     if (select !== undefined) setValue(key, toggled(JSON.parse(JSON.stringify(values[key] ?? [])), select));
   } else if (hit.kind === 'edge' && kind === 'vertex') {
@@ -355,6 +408,13 @@ export function addPicks(found: { faces: number[]; edges: number[] }) {
     const names = new Set<string>(values[key] ?? []);
     for (const i of found.faces) if (base.faces[i]) names.add(base.faces[i].name);
     setValue(key, [...names]);
+  } else if (kind === 'regions' && regionsTakeFaces()) {
+    const refs = new Set<string>(values.faces ?? []);
+    for (const i of found.faces) {
+      const ref = flatFace(base, i) ? faceRef(base, i) : null;
+      if (ref) refs.add(ref);
+    }
+    if (refs.size !== (values.faces ?? []).length) setValue('faces', [...refs]);
   } else if (kind === 'parts') {
     const names = new Set<string>(values[key] ?? []);
     for (const i of found.faces) {
@@ -423,6 +483,11 @@ export async function startFeature(defId: string) {
   const base = pickBase();
   const field = activeField();
   if (!field || !base || !activeDef()) return;
+  // A flat face selected first is what the extrude takes, as when you select a face in Onshape and press Extrude.
+  if (field.kind === 'regions' && sel.faces.length) {
+    const refs = [...new Set(sel.faces.filter((i) => flatFace(base, i)).map((i) => faceRef(base, i)).filter((x): x is string => !!x))];
+    if (refs.length) setValue('faces', refs);
+  }
   if (field.kind === 'edges' && sel.edges.length) setValue(field.key, sel.edges.map((i) => base.edges[i]?.select).filter(Boolean));
   if (field.kind === 'faces' && sel.faces.length) setValue(field.key, [...new Set(sel.faces.map((i) => base.faces[i]?.name).filter(Boolean))]);
   if (field.kind === 'parts' && sel.faces.length) setValue(field.key, [...new Set(sel.faces.map((i) => partOfFace(base, i)).filter(Boolean))]);

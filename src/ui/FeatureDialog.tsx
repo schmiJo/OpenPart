@@ -1,9 +1,9 @@
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from 'solid-js';
-import { setValueAt, acceptDialog, activatePick, activeDef, activePick, canonical, cancelDialog, clearRegions, dialogBusy, dialogError, dialogMissing, dialogName, editingId, hasLaterFeatures, nothingPicked, pickBase, removeRegions, setValue, showingFinal, toggleFinal, values, takesRegions } from '../features/dialog';
-import { AXIS_CHOICES, newStep, type FieldDef, type PathStep } from '../features/defs';
+import { removeFace, removeSection, regionsTakeFaces, setValueAt, acceptDialog, activatePick, activeDef, activePick, canonical, cancelDialog, clearRegions, dialogBusy, dialogError, dialogMissing, dialogName, editingId, hasLaterFeatures, nothingPicked, pickBase, removeRegions, setValue, showingFinal, toggleFinal, values, takesRegions } from '../features/dialog';
+import { AXIS_CHOICES, newStep, type FieldDef, type PathStep, type Section } from '../features/defs';
 import { edgeWord, faceWord, fmtNum, partLabel } from '../features/words';
 import { sameRegions, sketchLines, wholeSketch, type RegionPick } from '../sketch/regions';
-import { doc, isHidden, isSketchFeature, numberOr, sketchRegions } from '../store/doc';
+import { doc, isHidden, isSketchFeature, numberOr, partLooks, sketchRegions } from '../store/doc';
 import { view } from '../viewport/instance';
 import { DialogFrame } from './DialogFrame';
 import { Icon } from './icons';
@@ -179,28 +179,6 @@ function SketchField(props: { field: FieldDef }) {
   );
 }
 
-function SketchesField(props: { field: FieldDef }) {
-  const sketches = () => doc.features.filter((f) => isSketchFeature(f) && !isHidden(f));
-  const chosen = () => (values[props.field.key] as number[]) ?? [];
-  const toggle = (id: number) => setValue(props.field.key, chosen().includes(id) ? chosen().filter((x) => x !== id) : [...chosen(), id]);
-  return (
-    <div class="sketch-list">
-      <span class="field-label">{props.field.label}</span>
-      <For each={sketches()}>
-        {(s) => (
-          <label class="sketch-pick">
-            <input type="checkbox" data-sketch={s.id} checked={chosen().includes(s.id)} onChange={() => toggle(s.id)} />
-            <Icon name="sketch" />
-            <span class="feature-name">{s.name}</span>
-            <Show when={chosen().includes(s.id)}><span class="sketch-order">{chosen().indexOf(s.id) + 1}</span></Show>
-          </label>
-        )}
-      </For>
-      <Show when={props.field.hint}><p class="field-hint">{props.field.hint}</p></Show>
-    </div>
-  );
-}
-
 interface PickRow { name: string; size: string; remove: () => void }
 
 /** The tinted box from Onshape: what the field is for, then one row per thing picked, each with a way to drop it. */
@@ -257,7 +235,7 @@ function PickField(props: { field: FieldDef }) {
         const e = base?.edges.find((x) => canonical(x.select) === canonical(item));
         return { name: edgeWord(e?.curve), size: e ? `${fmtNum(e.length)} mm` : '', remove };
       }
-      if (kind === 'part' || kind === 'parts') return { name: base ? partLabel(base.mesh.parts, item) : item, size: '', remove };
+      if (kind === 'part' || kind === 'parts') return { name: base ? partLabel(base.mesh.parts, item, partLooks()) : item, size: '', remove };
       if (kind === 'vertex') return { name: 'Vertex', size: fmtPoint(item.near ?? item.point), remove };
       // One name can cover several faces, such as a pattern's copies.
       const faces = base?.faces.filter((x) => x.name === item || x.key === item) ?? [];
@@ -271,24 +249,43 @@ function PickField(props: { field: FieldDef }) {
 function RegionField(props: { field: FieldDef }) {
   const rows = createMemo<PickRow[]>(() => {
     if (nothingPicked()) return [];
+    const base = pickBase();
+    const faceRows = ((values.faces ?? []) as string[]).map((ref) => {
+      const faces = base?.faces.filter((x) => x.name === ref || x.key === ref) ?? [];
+      return { name: faceWord(faces[0]?.surface), size: faces.length ? `${fmtNum(faces.reduce((t, f) => t + f.area, 0))} mm²` : '', remove: () => removeFace(ref) };
+    });
     const picks = (values.regions ?? []) as RegionPick[];
     const sketches = [...new Set(picks.map((p) => p.sketch))];
-    if (!sketches.length && values.sketch !== null && values.sketch !== undefined) sketches.push(values.sketch);
-    return sketches.flatMap((sketch) => {
+    if (!sketches.length && !faceRows.length && values.sketch !== null && values.sketch !== undefined) sketches.push(values.sketch);
+    const regionRows = sketches.flatMap((sketch) => {
       const name = doc.features.find((f) => f.id === sketch)?.name ?? '';
       const there = sketchRegions().get(sketch) ?? [];
       const ids = picks.filter((p) => p.sketch === sketch).map((p) => p.id);
       if (!ids.length || sameRegions(ids, wholeSketch(there))) {
         const area = there.filter((r) => ids.includes(r.id)).reduce((t, r) => t + r.area, 0);
-        return [{ name: `All of ${name}`, size: area ? `${fmtNum(area)} mm²` : '', remove: () => (sketches.length > 1 ? removeRegions(sketch) : clearRegions()) }];
+        return [{ name: `All of ${name}`, size: area ? `${fmtNum(area)} mm²` : '', remove: () => (sketches.length > 1 || faceRows.length ? removeRegions(sketch) : clearRegions()) }];
       }
       return ids.map((id) => {
         const r = there.find((x) => x.id === id);
         return { name: `Region of ${name}`, size: r ? `${fmtNum(r.area)} mm²` : '', remove: () => removeRegions(sketch, [id]) };
       });
     });
+    return [...faceRows, ...regionRows];
   });
-  return <PickBox field={props.field} prompt="Click regions in the view" rows={rows()} waiting={nothingPicked()} clear={clearRegions} />;
+  return <PickBox field={props.field} prompt={regionsTakeFaces() ? 'Click flat faces or regions in the view' : 'Click regions in the view'} rows={rows()} waiting={nothingPicked()} clear={clearRegions} />;
+}
+
+/** A loft's profiles, numbered in the order it passes through them. */
+function SectionsField(props: { field: FieldDef }) {
+  const rows = createMemo<PickRow[]>(() =>
+    ((values.sections ?? []) as Section[]).map((x, i) => {
+      const name = doc.features.find((f) => f.id === x.sketch)?.name ?? '';
+      const there = sketchRegions().get(x.sketch) ?? [];
+      const area = x.id ? there.find((r) => r.id === x.id)?.area ?? 0 : there.filter((r) => wholeSketch(there).includes(r.id)).reduce((t, r) => t + r.area, 0);
+      return { name: `${i + 1}. ${x.id ? `Region of ${name}` : name}`, size: area ? `${fmtNum(area)} mm²` : '', remove: () => removeSection(i) };
+    }),
+  );
+  return <PickBox field={props.field} prompt="Click profiles in order, in the view or the list" rows={rows()} waiting={rows().length === 0} clear={() => setValue(props.field.key, [])} />;
 }
 
 /** A revolve's axis: a line of its sketch, clicked in the view or chosen here, or one of the sketch's own axes. */
@@ -376,9 +373,9 @@ function FieldList(props: { fields: FieldDef[]; off?: boolean }) {
             <Match when={f.kind === 'check'}><CheckField field={f} off={props.off} /></Match>
             <Match when={f.kind === 'group'}><GroupField field={f} off={props.off} /></Match>
             <Match when={f.kind === 'sketch'}><SketchField field={f} /></Match>
-            <Match when={f.kind === 'sketches'}><SketchesField field={f} /></Match>
             <Match when={['edges', 'faces', 'face', 'part', 'parts', 'vertex'].includes(f.kind)}><PickField field={f} /></Match>
             <Match when={f.kind === 'regions'}><RegionField field={f} /></Match>
+            <Match when={f.kind === 'sections'}><SectionsField field={f} /></Match>
             <Match when={f.kind === 'axis'}><AxisField field={f} /></Match>
             <Match when={f.kind === 'steps'}><StepsField field={f} /></Match>
           </Switch>

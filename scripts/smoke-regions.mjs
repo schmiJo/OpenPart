@@ -131,7 +131,7 @@ await settle(500);
 check('the dialog starts with that region', /^1 of Sketch 1/.test(await well()), await well());
 s = await state();
 check('only that region extrudes', near(s.volume, RECT * 20), `${s.volume}`);
-check('it builds through a hidden copy', hidden(s).length === 1, JSON.stringify(s.features));
+check('it builds with no hidden copy of the sketch', hidden(s).length === 0, JSON.stringify(s.features));
 await shot('r05-one-region-preview');
 
 console.log('add and drop regions in the dialog');
@@ -151,9 +151,9 @@ await settle(400);
 check('clicking again drops them', near((await state()).volume, RECT * 20), `${(await state()).volume}`);
 await accept();
 s = await state();
-check('it goes in as one extrude', s.features.filter((f) => f.type === 'extrude').length === 1 && hidden(s).length === 1, JSON.stringify(s.features));
+check('it goes in as one extrude', s.features.filter((f) => f.type === 'extrude').length === 1 && hidden(s).length === 0, JSON.stringify(s.features));
 const titled = await page.$eval('.features h2', (e) => e.textContent);
-check('the hidden copy stays out of the list', titled === 'Features (2)', titled);
+check('the list has the sketch and the extrude', titled === 'Features (2)', titled);
 await shot('r07-first-extruded');
 
 console.log('the rest of the sketch stays there to extrude');
@@ -177,7 +177,7 @@ await page.keyboard.press('0');
 await wait(500);
 s = await state();
 check('three lengths from one sketch', near(s.volume, RECT * 20 + RING * 10 + DISC * 5) && s.valid, `${s.volume}`);
-check('three hidden copies', hidden(s).length === 3);
+check('and no hidden copies', hidden(s).length === 0);
 check('with every region used, the sketch goes away', (await regionAt(25, 0, 0)) !== 'region');
 await shot('r08-three-lengths');
 
@@ -191,7 +191,7 @@ await typeInto('length', '30');
 await accept();
 s = await state();
 check('an edit keeps the regions', near(s.volume, RECT * 30 + RING * 10 + DISC * 5), `${s.volume}`);
-check('an edit adds no copies', hidden(s).length === 3);
+check('an edit adds no copies', hidden(s).length === 0);
 await page.mouse.move(700, 20);
 await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
 await settle(400);
@@ -201,7 +201,7 @@ await page.reload({ waitUntil: 'load' });
 await page.waitForFunction(() => window.schmishape?.doc?.features?.length > 0, { timeout: 15000 });
 await settle(500);
 s = await state();
-check('the regions survive a reload', near(s.volume, RECT * 20 + RING * 10 + DISC * 5) && hidden(s).length === 3, `${s.volume}`);
+check('the regions survive a reload', near(s.volume, RECT * 20 + RING * 10 + DISC * 5) && hidden(s).length === 0, `${s.volume}`);
 
 console.log('the whole sketch');
 await newPart();
@@ -216,10 +216,10 @@ check('all of it keeps its holes', near(s.volume, (RING + RECT) * 20), `${s.volu
 check('and needs no copy', hidden(s).length === 0);
 await clickWorld(25, 0);
 await settle(400);
-check('dropping a region makes it a choice', near((await state()).volume, RING * 20) && hidden(await state()).length === 1, `${(await state()).volume}`);
+check('dropping a region makes it a choice', near((await state()).volume, RING * 20) && hidden(await state()).length === 0, `${(await state()).volume}`);
 await page.$eval('[data-testid=pick-well] .link', (e) => e.click());
 await settle(400);
-check('Clear empties it', /^Click regions/.test(await well()) && await page.$eval('[data-testid=dialog-ok]', (e) => e.disabled), await well());
+check('Clear empties it', /^Click flat faces or regions/.test(await well()) && await page.$eval('[data-testid=dialog-ok]', (e) => e.disabled), await well());
 await shot('r10-cleared');
 await clickRow('Sketch 1');
 await settle(300);
@@ -238,7 +238,7 @@ await page.keyboard.press('1');
 await wait(500);
 await cmd('extrude');
 await settle(300);
-check('with nothing selected the dialog waits', /^Click regions/.test(await well()), await well());
+check('with nothing selected the dialog waits', /^Click flat faces or regions/.test(await well()), await well());
 check('and builds nothing', (await state()).features.length === 1);
 {
   const [ax, ay] = await toScreen(5, -20);
@@ -291,7 +291,7 @@ check('no hidden name shows', !/~regions/.test(await page.$eval('[data-testid=st
 await shot('r12-region-gone');
 await (await row('Extrude 1')).click({ count: 2 });
 await settle(500);
-check('editing asks for regions again', /^Click regions/.test(await well()), await well());
+check('editing asks for regions again', /^Click flat faces or regions/.test(await well()), await well());
 await clickWorld(-30, 0);
 await settle(400);
 check('picking one repairs it', near((await state()).volume, 1600 * 20) && !(await state()).failed, `${(await state()).volume} ${(await state()).failed}`);

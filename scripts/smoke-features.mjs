@@ -230,6 +230,8 @@ console.log('Sweep and helix');
   s = await state();
   check('a step added to the path carries it on', JSON.stringify(last(s).path[2]) === JSON.stringify({ line: 15 }) && near(s.volume, Math.PI * 9 * (length + 15), 5e-3), `${JSON.stringify(last(s).path)} ${s.volume}`);
   await shot('sweep');
+  const squeezed = await page.$$eval('.step-input input', (i) => i.filter((x) => x.clientWidth < 18).length);
+  check('every step’s boxes have room for a number', squeezed === 0, `${squeezed} too narrow`);
   await accept();
 
   await fresh();
@@ -274,6 +276,9 @@ console.log('Surfaces');
   }
   s = await state();
   check('two fills add a surface each', s.parts.filter((p) => p.sheet).length === 3, JSON.stringify(s.parts));
+  await page.mouse.move(700, 700);
+  await fit();
+  await shot('surfaces');
   await cmd('sew');
   await accept();
   s = await state();
@@ -332,3 +337,321 @@ console.log('Variable fillet');
   await page.keyboard.press('Escape');
   await settle(300);
 }
+
+console.log('Extrude a part’s flat faces');
+{
+  await fresh();
+  await mutate('feature_add', { feature: { type: 'solid', shape: 'box', dx: 40, dy: 30, dz: 10 }, name: 'Block' });
+  await mutate('feature_add', { feature: { type: 'solid', shape: 'cylinder', radius: 5, height: 10, at: { origin: [60, 15, 0] }, mode: 'new_body' }, name: 'Peg' });
+  await settle(300);
+  await fit();
+  await cmd('extrude');
+  check('Extrude opens with no sketch in the document', await dialogOpen());
+  check('its box takes faces and regions', (await page.$eval('[data-pick=regions] .pick-label', (e) => e.textContent)) === 'Faces and sketch regions to extrude');
+  await clickWorld(20, 15, 10);
+  let r = await rows('regions');
+  let s = await state();
+  check('a click on the top picks it', JSON.stringify(r) === '["Flat face"]' && JSON.stringify(last(s).faces) === '["f1:end"]' && last(s).sketch === undefined, `${JSON.stringify(r)} ${JSON.stringify(last(s))}`);
+  check('and it grows up from there', near(s.volume, 40 * 30 * 30 + Math.PI * 25 * 10, 1e-3), `${s.volume}`);
+  await shot('face-extrude');
+  await clickWorld(65, 15, 5);
+  r = await rows('regions');
+  check('a curved face isn’t taken', JSON.stringify(r) === '["Flat face"]', JSON.stringify(r));
+  await clickSegment('Result', 'Remove');
+  await page.$eval('[data-testid=flip-direction]', (e) => e.click());
+  await settle(500);
+  await typeInto('length', '4');
+  s = await state();
+  check('flipped and Remove, it cuts down into the part', near(s.volume, 40 * 30 * 6 + Math.PI * 25 * 10, 1e-3) && !s.failed, `${s.volume} ${s.failed}`);
+  await accept();
+  s = await state();
+  check('it goes in with no sketch', last(s).type === 'extrude' && last(s).sketch === undefined && last(s).mode === 'remove', JSON.stringify(last(s)));
+  await edit(last(s).id);
+  r = await rows('regions');
+  check('editing shows the face', JSON.stringify(r) === '["Flat face"]', JSON.stringify(r));
+  await page.keyboard.press('Escape');
+  await settle(400);
+
+  await clickWorld(20, 0, 3);
+  await settle(200);
+  await cmd('extrude');
+  r = await rows('regions');
+  s = await state();
+  check('a face selected first is what Extrude takes', JSON.stringify(r) === '["Flat face"]' && JSON.stringify(last(s).faces) === '["f1:side.0"]', `${JSON.stringify(r)} ${JSON.stringify(last(s).faces)}`);
+  await page.keyboard.press('Escape');
+  await settle(400);
+  {
+    const [x, y] = await toScreen(20, 15, 6);
+    await page.mouse.click(x, y, { button: 'right' });
+    await wait(200);
+    const items = await page.$$eval('.menu [data-item]', (m) => m.map((x) => [x.dataset.item, x.disabled ?? false]));
+    check('right-clicking a flat face offers Extrude', items.some(([n, off]) => n === 'Extrude' && !off), JSON.stringify(items));
+    await page.keyboard.press('Escape');
+    await settle(200);
+  }
+}
+
+console.log('A part’s corners and edges while sketching');
+{
+  await fresh();
+  await mutate('feature_add', { feature: { type: 'solid', shape: 'box', dx: 40, dy: 30, dz: 10 }, name: 'Block' });
+  await settle(300);
+  await fit();
+  await page.evaluate(() => document.querySelector('[data-command="sketch"]').click());
+  await settle(300);
+  await clickWorld(20, 15, 10);
+  await settle(600);
+  check('a sketch opens on the top', await page.evaluate(() => !!window.schmishape.session()));
+  await page.keyboard.press('v');
+  await page.waitForFunction(() => !!window.schmishape.session()?.part, { timeout: 5000 }).catch(() => {});
+  const hoverAt = async (x, y, z) => { const [a, b] = await toScreen(x, y, z); await page.mouse.move(a + 1, b + 1); await wait(150); return page.evaluate(() => window.schmishape.session().hover); };
+  const corner = await hoverAt(40, 0, 10);
+  check('hovering a corner of the block finds it', /^pv\d+$/.test(corner ?? ''), `${corner}`);
+  await shot('sketch-part-corner');
+  const edge = await hoverAt(20, 0, 10);
+  check('hovering an edge of the block finds it', /^pe\d+$/.test(edge ?? ''), `${edge}`);
+  check('a corner hidden behind the block can’t be picked', !/^p/.test((await hoverAt(0, 30, 0)) ?? ''), `${await hoverAt(0, 30, 0)}`);
+  await page.keyboard.press('l');
+  await clickWorld(10, 10, 10);
+  await clickWorld(30, 10, 10);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('v');
+  await settle(400);
+  await clickWorld(30, 10, 10);
+  { const [a, b] = await toScreen(40, 0, 10); await page.keyboard.down('Shift'); await clickAt(a + 1, b + 1); await page.keyboard.up('Shift'); }
+  await settle(200);
+  const sel = await page.evaluate(() => window.schmishape.session().selection[0]());
+  check('a line’s end and the corner can be selected together', sel.length === 2 && sel.some((k) => /^pv/.test(k)), JSON.stringify(sel));
+  check('which turns Coincident on', await page.$eval('[data-constraint=coincident]', (e) => !e.disabled));
+  await shot('sketch-part-selected');
+  await page.$eval('[data-constraint=coincident]', (e) => e.click());
+  await settle(500);
+  let sk = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.session().data)));
+  const linkedPoint = sk.entities.find((e) => e.type === 'projected' && e.from?.vertex);
+  const lineEnd = sk.entities.find((e) => e.id === 1)?.end;
+  check('Coincident brings the corner in as a linked point', !!linkedPoint && sk.constraints.some((c) => c.type === 'coincident' && c.b === String(linkedPoint.id)), JSON.stringify(sk.entities.map((e) => e.type)));
+  check('and the line’s end moves onto it', lineEnd && Math.hypot(lineEnd[0] - 40, lineEnd[1] - 0) < 1e-6, JSON.stringify(lineEnd));
+  await shot('sketch-linked-corner');
+  // Use: the block's back edge, as a curve of the sketch.
+  { const [a, b] = await toScreen(20, 30, 10); await clickAt(a, b - 1); }
+  await settle(200);
+  const usable = await page.$eval('[data-tool=use]', (e) => !e.disabled);
+  await page.keyboard.press('u');
+  await settle(500);
+  sk = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.session().data)));
+  const used = sk.entities.find((e) => e.type === 'projected' && e.from?.edge);
+  check('Use brings a part’s edge in as a curve of the sketch', usable && !!used && used.construction === false && used.geometry?.type === 'line', JSON.stringify(used));
+  // Drawing onto a corner ties to it, as Onshape's snapping does.
+  await page.keyboard.press('l');
+  await clickWorld(0, 30, 10);
+  await clickWorld(10, 25, 10);
+  await page.keyboard.press('Escape');
+  await settle(500);
+  sk = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.session().data)));
+  // There the corner is also the end of the edge Use brought in, which follows the part just the same.
+  const linkedIds = sk.entities.filter((e) => e.type === 'projected').map((e) => String(e.id));
+  const newLine = Math.max(...sk.entities.filter((e) => e.type === 'line').map((e) => e.id));
+  const tie = sk.constraints.find((c) => c.type === 'coincident' && [c.a, c.b].includes(`${newLine}.start`));
+  check('a line started on a corner is tied to it', !!tie && [tie.a, tie.b].some((r) => linkedIds.includes(r.split('.')[0])), JSON.stringify(sk.constraints));
+  // The kernel builds a sketch only if something in it closes, so a circle gives it one.
+  await page.keyboard.press('c');
+  await clickWorld(20, 15, 10);
+  await clickWorld(24, 15, 10);
+  await page.keyboard.press('Escape');
+  await settle(500);
+  await page.$eval('[data-testid=sketch-done]', (e) => e.click());
+  await settle(800);
+  let s = await state();
+  const sketchFeature = s.features.find((f) => f.type === 'constrained_sketch');
+  check('the sketch keeps its links', !!sketchFeature && sketchFeature.sketch.entities.filter((e) => e.type === 'projected').length === 2 && !s.failed, `${JSON.stringify(sketchFeature?.sketch.entities.map((e) => e.type))} ${s.failed}`);
+  // Make the block longer: the tied end goes with its corner.
+  await mutate('feature_edit', { id: 1, feature: { type: 'solid', shape: 'box', dx: 60, dy: 30, dz: 10 } });
+  await settle(400);
+  s = await state();
+  const sf = s.features.find((f) => f.type === 'constrained_sketch');
+  const solved = await page.evaluate((f, i) => window.schmishape.engine.call('sketch_solve', { sketch: f.sketch, context: { plane: f.plane, position: i } }).then((r) => JSON.parse(r.text).sketch), sf, s.features.indexOf(sf));
+  const end = solved.entities.find((e) => e.id === 1)?.end;
+  check('when the block grows, the tied point follows its corner', end && Math.hypot(end[0] - 60, end[1]) < 1e-6 && !s.failed, `${JSON.stringify(end)} ${s.failed}`);
+}
+
+console.log('Renaming and coloring parts');
+{
+  await fresh();
+  await mutate('feature_add', { feature: { type: 'solid', shape: 'box', dx: 40, dy: 30, dz: 10 }, name: 'Block' });
+  await mutate('feature_add', { feature: { type: 'solid', shape: 'sphere', radius: 8, at: { origin: [60, 15, 8] }, mode: 'new_body' }, name: 'Ball' });
+  await settle(300);
+  await fit();
+  const partRow = (body) => page.$(`.parts [data-body="${body}"]`);
+  const rowName = (body) => page.$eval(`.parts [data-body="${body}"] .feature-name`, (e) => e.textContent);
+  const menuOn = async (body, item) => {
+    const b = await (await partRow(body)).boundingBox();
+    await page.mouse.click(b.x + 40, b.y + 10, { button: 'right' });
+    await wait(150);
+    const items = await page.$$eval('.menu [data-item]', (m) => m.map((x) => x.dataset.item));
+    if (item) { await page.$eval(`.menu [data-item="${item}"]`, (e) => e.click()); await settle(300); }
+    return items;
+  };
+  const items = await menuOn('f1');
+  check('a part’s menu has Rename and Edit appearance', items.includes('Rename') && items.includes('Edit appearance…'), JSON.stringify(items));
+  await page.keyboard.press('Escape');
+  await menuOn('f1', 'Rename');
+  await page.keyboard.type('Bracket');
+  await page.keyboard.press('Enter');
+  await settle(400);
+  let app = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.doc.app)));
+  check('Rename gives the part a name of its own', (await rowName('f1')) === 'Bracket' && app.parts?.f1?.name === 'Bracket', `${await rowName('f1')} ${JSON.stringify(app)}`);
+  await menuOn('f2', 'Edit appearance…');
+  check('Edit appearance opens a dialog for that part', (await page.$eval('[data-testid=appearance] h3', (e) => e.textContent)) === 'Appearance of Part 2');
+  await page.$eval('[data-color="#3f6fb0"]', (e) => e.click());
+  await settle(200);
+  await shot('appearance-trying');
+  app = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.doc.app)));
+  check('trying a color doesn’t keep it yet', !app.parts?.f2?.color, JSON.stringify(app));
+  await page.$eval('[data-testid=appearance-ok]', (e) => e.click());
+  await settle(400);
+  app = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.doc.app)));
+  check('✓ keeps it with the document', app.parts?.f2?.color === '#3f6fb0' && app.parts?.f1?.name === 'Bracket', JSON.stringify(app));
+  check('and the list shows it on the icon', !!(await page.$('.parts [data-body="f2"] .part-icon.tinted')));
+  await page.mouse.move(700, 600);
+  await shot('appearance-kept');
+  await page.mouse.move(700, 20);
+  await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
+  await settle(400);
+  app = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.doc.app)));
+  check('undo takes the color back', !app.parts?.f2?.color && app.parts?.f1?.name === 'Bracket', JSON.stringify(app));
+  await menuOn('f2', 'Edit appearance…');
+  await page.$eval('[data-color="#b8433a"]', (e) => e.click());
+  await page.keyboard.press('Escape');
+  await settle(300);
+  app = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.doc.app)));
+  check('Esc leaves it as it was', !(await page.$('[data-testid=appearance]')) && !app.parts?.f2?.color, JSON.stringify(app));
+  await (await partRow('f1')).click({ count: 2 });
+  await settle(200);
+  await page.$eval('.parts .feature-rename', (e) => { e.focus(); e.select(); });
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('Enter');
+  await settle(400);
+  app = await page.evaluate(() => JSON.parse(JSON.stringify(window.schmishape.doc.app)));
+  check('clearing the name, from a double-click, goes back to Part 1', (await rowName('f1')) === 'Part 1' && !app.parts, `${await rowName('f1')} ${JSON.stringify(app)}`);
+}
+
+console.log('Revolve and loft take regions');
+{
+  await fresh();
+  await mutate('feature_add', { feature: sketch([...rect(1, 10, 0, 10, 30), ...rect(5, 30, 0, 10, 30)]), name: 'Sketch 1' });
+  await settle(300);
+  await fit();
+  await cmd('revolve');
+  let s = await state();
+  const ring = (a, b) => Math.PI * (b * b - a * a) * 30;
+  check('a revolve starts with all of the last sketch', near(s.volume, ring(10, 20) + ring(30, 40), 1e-3), `${s.volume}`);
+  check('and, with its regions there, the axis box takes the clicks', (await activeBox()) === 'axis', `${await activeBox()}`);
+  await page.$eval('[data-pick=regions]', (e) => e.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+  await settle(200);
+  await clickWorld(35, 15, 0);
+  s = await state();
+  check('a click drops one region', near(s.volume, ring(10, 20), 1e-3) && JSON.stringify(await rows('regions')) === '["Region of Sketch 1"]', `${s.volume} ${JSON.stringify(await rows('regions'))}`);
+  await accept();
+  s = await state();
+  const idA = await regionId(s, 1, 300);
+  check('the revolve lists its region', last(s).sketch === 1 && JSON.stringify(last(s).regions) === JSON.stringify([idA]), JSON.stringify(last(s)));
+  await mutate('feature_add', { feature: sketch(rect(1, 50, 0, 10, 30)), name: 'Sketch 2', position: 1 });
+  await settle(300);
+  await fit();
+  s = await state();
+  await edit(last(s).id);
+  await clickWorld(55, 15, 0);
+  s = await state();
+  const idC = await regionId(s, s.features.find((f) => f.name === 'Sketch 2').id, 300);
+  check('a region of another sketch in the same plane joins it', JSON.stringify(last(s).regions) === JSON.stringify([idA, { sketch: s.features.find((f) => f.name === 'Sketch 2').id, region: idC }]) && near(s.volume, ring(10, 20) + ring(50, 60), 1e-3), `${JSON.stringify(last(s).regions)} ${s.volume}`);
+  await shot('revolve-regions');
+  await accept();
+
+  await fresh();
+  await mutate('feature_add', { feature: sketch([circle(1, 0, 0, 10), circle(2, 50, 0, 10)]), name: 'Base' });
+  await mutate('feature_add', { feature: sketch([circle(1, 0, 0, 5)], [0, 0, 30]), name: 'Top' });
+  await settle(300);
+  await fit();
+  await cmd('loft');
+  check('a loft’s profiles box takes the clicks', (await activeBox()) === 'sections', `${await activeBox()}`);
+  await clickWorld(0, 0, 0);
+  await clickWorld(0, 0, 30);
+  s = await state();
+  const r = await rows('sections');
+  check('profiles are listed in the order they’re clicked', JSON.stringify(r) === '["1. Region of Base","2. Region of Top"]', JSON.stringify(r));
+  const base = await regionId(s, 1, Math.PI * 100);
+  check('one region of a sketch with two outlines can be a profile', JSON.stringify(last(s).sections) === JSON.stringify([{ sketch: 1, region: base }, 2]), JSON.stringify(last(s).sections));
+  const frustum = Math.PI * 30 / 3 * (100 + 50 + 25);
+  check('and the loft runs between them', near(s.volume, frustum, 1e-2) && s.valid, `${s.volume} vs ${frustum}`);
+  await shot('loft-regions');
+  await clickWorld(0, 0, 0);
+  check('clicking a profile again drops it', JSON.stringify(await rows('sections')) === '["1. Region of Top"]', JSON.stringify(await rows('sections')));
+  await page.keyboard.press('Escape');
+  await settle(400);
+}
+
+console.log('Constraint tools wait for their picks');
+{
+  await fresh();
+  await mutate('feature_add', { feature: { type: 'solid', shape: 'box', dx: 40, dy: 30, dz: 10 }, name: 'Block' });
+  await settle(300);
+  await fit();
+  await page.evaluate(() => document.querySelector('[data-command="sketch"]').click());
+  await settle(300);
+  await clickWorld(20, 15, 10);
+  await settle(600);
+  await page.waitForFunction(() => !!window.schmishape.session()?.part, { timeout: 5000 }).catch(() => {});
+  await page.keyboard.press('l');
+  await clickWorld(5, 5, 10);
+  await clickWorld(15, 8, 10);
+  await page.keyboard.press('Escape');
+  await clickWorld(25, 12, 10);
+  await clickWorld(32, 20, 10);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('v');
+  await settle(400);
+  const sess = () => page.evaluate(() => { const s = window.schmishape.session(); return { tool: s.constraintTool[0](), sel: s.selection[0](), data: JSON.parse(JSON.stringify(s.data)) }; });
+  const pressed = () => page.$eval('[data-constraint=coincident]', (e) => e.getAttribute('aria-pressed'));
+  check('Coincident can be clicked with nothing selected', await page.$eval('[data-constraint=coincident]', (e) => !e.disabled));
+  await page.$eval('[data-constraint=coincident]', (e) => e.click());
+  await settle(150);
+  check('and then it stays on, waiting for picks', (await pressed()) === 'true' && (await sess()).tool === 'coincident');
+  check('the status bar says what it takes', /^Coincident takes two points/.test(await page.$eval('.status-left', (e) => e.textContent)), await page.$eval('.status-left', (e) => e.textContent));
+  const before = (await sess()).data.constraints.length;
+  await clickWorld(15, 8, 10);
+  check('one pick waits for the second', (await sess()).sel.length === 1 && (await sess()).data.constraints.length === before);
+  await clickWorld(25, 12, 10);
+  await settle(500);
+  let st = await sess();
+  const made = st.data.constraints.slice(before);
+  check('the second makes them coincident', made.length === 1 && made[0].type === 'coincident' && st.sel.length === 0, JSON.stringify(made));
+  check('and the tool stays on for the next pair', (await pressed()) === 'true');
+  await shot('coincident-tool');
+  // A line's end and a part's corner.
+  await clickWorld(32, 20, 10);
+  { const [a, b] = await toScreen(40, 30, 10); await clickAt(a - 1, b + 1); }
+  await settle(500);
+  st = await sess();
+  const linked = st.data.entities.find((e) => e.type === 'projected');
+  const end = st.data.entities.find((e) => e.type === 'line' && Math.hypot(e.end[0] - 40, e.end[1] - 30) < 1e-6);
+  check('a point and a part’s corner work the same way', !!linked && !!end, JSON.stringify(st.data.entities.map((e) => [e.type, e.end])));
+  // Two lines can't be coincident: it says why and starts again from the last pick.
+  const lines = st.data.entities.filter((e) => e.type === 'line');
+  const mid = (e) => [(e.start[0] + e.end[0]) / 2, (e.start[1] + e.end[1]) / 2];
+  await clickWorld(...mid(lines[0]), 10);
+  await clickWorld(...mid(lines[1]), 10);
+  await settle(200);
+  const said = await page.$$eval('.toast', (t) => t.map((x) => x.textContent).join(' '));
+  check('two lines say what Coincident takes', /Coincident takes two points, or a point and a curve/.test(said) && (await sess()).sel.length === 1, `${said} ${JSON.stringify((await sess()).sel)}`);
+  await page.keyboard.press('Escape');
+  await settle(150);
+  check('Esc turns the tool off', (await pressed()) === 'false' && (await sess()).tool === null);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await settle(300);
+}
+
+for (const p of problems) console.log(`  problem: ${p}`);
+console.log(`\n${passed} passed, ${failures.length} failed`);
+await browser.close();
+process.exit(failures.length || problems.length ? 1 : 0);

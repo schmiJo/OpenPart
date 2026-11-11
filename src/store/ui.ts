@@ -94,3 +94,9 @@ export function togglePart(i: number) {
   else next.add(i);
   setHiddenParts(next);
 }
+
+/** The part whose appearance is being edited, by the kernel's name for it, and the color it's being tried in. */
+export const [appearanceFor, setAppearanceFor] = createSignal<string | null>(null);
+export const [lookPreview, setLookPreview] = createSignal<{ body: string; color: string | null } | null>(null);
+/** The part being renamed in the Parts list, by the kernel's name for it. */
+export const [renamingPart, setRenamingPart] = createSignal<string | null>(null);

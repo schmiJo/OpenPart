@@ -11,13 +11,16 @@ layout(location=1) in vec3 aNormal;
 layout(location=2) in uint aFace;
 uniform mat4 uVP;
 uniform highp usampler2D uStates;
+uniform highp sampler2D uColors;
 out vec3 vN;
 flat out uint vState;
 flat out uint vId;
+flat out vec4 vColor;
 void main(){
   vN = aNormal;
   vId = aFace;
   vState = texelFetch(uStates, ivec2(int(aFace) % ${TEX_W}, int(aFace) / ${TEX_W}), 0).r;
+  vColor = texelFetch(uColors, ivec2(int(aFace) % ${TEX_W}, int(aFace) / ${TEX_W}), 0);
   // State 4 is a hidden part: outside the clip volume, so it's neither drawn nor picked.
   gl_Position = vState == 4u ? vec4(2.0, 2.0, 2.0, 1.0) : uVP * vec4(aPos, 1.0);
 }`;
@@ -27,6 +30,7 @@ precision highp float;
 in vec3 vN;
 flat in uint vState;
 flat in uint vId;
+flat in vec4 vColor;
 uniform vec3 uRight, uUp, uBack;
 uniform float uOverlay;
 uniform float uAlpha;
@@ -49,7 +53,9 @@ void main(){
   float gloss = pow(max(dot(N, H), 0.0), 26.0);
   float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
   float lum = 0.40 + 0.50 * wrap + 0.10 * sky;
-  vec3 c = ALLOY * lum + vec3(gloss * 0.16 + rim * 0.10);
+  // A part given a color of its own has it in its faces' texel, and the rest stay alloy grey.
+  vec3 base = vColor.a > 0.5 ? vColor.rgb : ALLOY;
+  vec3 c = base * lum + vec3(gloss * 0.16 + rim * 0.10);
   if (vState == 1u) c = mix(c, MARK, 0.16);
   else if (vState >= 2u) c = mix(c, MARK, 0.4);
   o = vec4(c, uAlpha);
@@ -168,8 +174,42 @@ function program(gl: WebGL2RenderingContext, vs: string, fs: string) {
 }
 
 interface GpuLines { vao: WebGLVertexArrayObject; buffers: WebGLBuffer[]; count: number; states: StateTex }
-interface GpuMesh { vao: WebGLVertexArrayObject; buffers: WebGLBuffer[]; indexCount: number; lines: GpuLines; faceStates: StateTex }
+interface GpuMesh { vao: WebGLVertexArrayObject; buffers: WebGLBuffer[]; indexCount: number; lines: GpuLines; faceStates: StateTex; faceColors: ColorTex }
 interface GpuRegions { vao: WebGLVertexArrayObject; buffers: WebGLBuffer[]; count: number; states: StateTex }
+
+/** A color for each face, as RGBA bytes. Alpha zero means the default. */
+class ColorTex {
+  tex: WebGLTexture;
+  data = new Uint8Array(TEX_W * 8 * 4);
+  dirty = true;
+  constructor(private gl: WebGL2RenderingContext) {
+    this.tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+  set(colors: Map<number, [number, number, number]>) {
+    this.data.fill(0);
+    for (const [i, [r, g, b]] of colors) {
+      if (i * 4 + 3 >= this.data.length) continue;
+      this.data.set([Math.round(r * 255), Math.round(g * 255), Math.round(b * 255), 255], i * 4);
+    }
+    this.dirty = true;
+  }
+  bind(unit: number) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    if (this.dirty) {
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, TEX_W, 8, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.data);
+      this.dirty = false;
+    }
+  }
+  dispose() {
+    this.gl.deleteTexture(this.tex);
+  }
+}
 
 class StateTex {
   tex: WebGLTexture;
@@ -321,7 +361,7 @@ export class Renderer {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idx);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.indices, gl.STATIC_DRAW);
     gl.bindVertexArray(null);
-    return { vao, buffers: [pos, nor, face, idx], indexCount: m.indices.length, lines: this.makeLines(m.segments, m.segmentIds), faceStates: new StateTex(gl) };
+    return { vao, buffers: [pos, nor, face, idx], indexCount: m.indices.length, lines: this.makeLines(m.segments, m.segmentIds), faceStates: new StateTex(gl), faceColors: new ColorTex(gl) };
   }
 
   private freeMesh(m: GpuMesh | null) {
@@ -329,12 +369,14 @@ export class Renderer {
     this.gl.deleteVertexArray(m.vao);
     m.buffers.forEach((b) => this.gl.deleteBuffer(b));
     m.faceStates.dispose();
+    m.faceColors.dispose();
     this.freeLines(m.lines);
   }
 
   setMesh(m: MeshData | null) {
     this.freeMesh(this.mesh);
     this.mesh = m && m.indices.length ? this.makeMesh(m) : null;
+    this.mesh?.faceColors.set(this.colors.main);
     if (m && m.indices.length) {
       const r = Math.hypot(m.max[0] - m.min[0], m.max[1] - m.min[1], m.max[2] - m.min[2]) / 2;
       this.meshSize = r * 2;
@@ -354,6 +396,7 @@ export class Renderer {
   setPreviewBase(m: MeshData | null) {
     this.freeMesh(this.previewBase);
     this.previewBase = m && m.indices.length ? this.makeMesh(m) : null;
+    this.previewBase?.faceColors.set(this.colors.base);
     this.invalidate();
   }
 
@@ -389,6 +432,16 @@ export class Renderer {
     this.freeLines(this.sketchLines);
     const n = segments.length / 6;
     this.sketchLines = n ? this.makeLines(segments, new Uint32Array(n)) : null;
+    this.invalidate();
+  }
+
+  /** Each part's own color, by face, on the model and on the model under a see-through preview. */
+  /** Kept, so that a mesh made after them gets them too, whichever comes first. */
+  private colors = { main: new Map<number, [number, number, number]>(), base: new Map<number, [number, number, number]>() };
+  setFaceColors(main: Map<number, [number, number, number]>, base: Map<number, [number, number, number]> = new Map()) {
+    this.colors = { main, base };
+    this.mesh?.faceColors.set(main);
+    this.previewBase?.faceColors.set(base);
     this.invalidate();
   }
 
@@ -489,6 +542,8 @@ export class Renderer {
     gl.uniformMatrix4fv(prog.u.uVP, false, vp);
     m.faceStates.bind(0);
     gl.uniform1i(prog.u.uStates, 0);
+    m.faceColors.bind(1);
+    gl.uniform1i(prog.u.uColors, 1);
     gl.bindVertexArray(m.vao);
     gl.drawElements(gl.TRIANGLES, m.indexCount, gl.UNSIGNED_INT, 0);
   }

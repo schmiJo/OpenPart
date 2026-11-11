@@ -94,7 +94,18 @@ export function arcPoints(c: V2, r: number, a0: number, a1: number, stepDeg = 4)
 export const angleOf = (c: V2, p: V2) => Math.atan2(p[1] - c[1], p[0] - c[0]);
 
 /** An entity as a polyline in sketch coordinates. */
+/**
+ * A projected entity as what it projects to: a part's corner or edge, seen along the sketch's normal, which the kernel
+ * works out and keeps in `geometry`. It's construction unless it says otherwise, and fixed: nothing in the sketch moves it.
+ */
+export function drawn(e: Ent): Ent {
+  if (e.type !== 'projected') return e;
+  return { ...(e.geometry ?? { type: 'none' }), id: e.id, construction: e.construction !== false, projected: true, from: e.from };
+}
+export const isProjected = (e: Ent | undefined) => e?.type === 'projected' || !!e?.projected;
+
 export function polyline(e: Ent): V2[] {
+  e = drawn(e);
   switch (e.type) {
     case 'line':
       return [e.start!, e.end!];
@@ -201,6 +212,8 @@ function onArc(e: Ent, p: V2, tol = 1e-7) {
 
 /** Where two curves cross, with each counted only within its own ends. Splines count as their sampled shape. */
 export function crossings(a: Ent, b: Ent): V2[] {
+  a = drawn(a);
+  b = drawn(b);
   const isRound = (e: Ent) => e.type === 'circle' || e.type === 'arc';
   const segs = (e: Ent): [V2, V2][] => {
     const pts = polyline(e);
@@ -251,6 +264,7 @@ export function crossings(a: Ent, b: Ent): V2[] {
 
 /** The points of an entity with their references. */
 export function pointsOf(e: Ent): { ref: string; p: V2 }[] {
+  e = drawn(e);
   switch (e.type) {
     case 'line':
       return [{ ref: `${e.id}.start`, p: e.start! }, { ref: `${e.id}.end`, p: e.end! }];
@@ -277,6 +291,7 @@ export function closestOnSegment(p: V2, a: V2, b: V2): V2 {
 }
 
 export function closestOnEntity(e: Ent, p: V2): V2 | null {
+  e = drawn(e);
   if (e.type === 'line') return closestOnSegment(p, e.start!, e.end!);
   if (e.type === 'circle' || e.type === 'arc') {
     const c = e.center!, r = e.radius!;

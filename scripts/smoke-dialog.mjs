@@ -44,8 +44,10 @@ const accept = async () => { await page.$eval('[data-testid=dialog-ok]', (e) => 
 const typeInto = async (field, text) => { await page.$eval(`[data-field=${field}]`, (e) => { e.focus(); e.select(); }); await page.keyboard.type(text); await settle(350); };
 const dlg = () => page.$eval('[data-testid=dialog]', (e) => { const b = e.getBoundingClientRect(); return { x: b.left, y: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height }; });
 const stage = () => page.$eval('.stage', (e) => { const b = e.getBoundingClientRect(); return { x: b.left, y: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height }; });
-const tabOn = () => page.$$eval('.dialog-tabs button.on', (b) => b[0]?.textContent ?? null);
-const clickTab = async (name) => { await page.$$eval('.dialog-tabs button', (b, n) => b.find((x) => x.textContent === n).click(), name); await settle(400); };
+// New, Add, Remove and Intersect: the row under the Solid and Surface tabs, as in Onshape.
+const RESULT = '[aria-label=Result] button';
+const tabOn = () => page.$$eval(`${RESULT}.on`, (b) => b[0]?.textContent ?? null);
+const clickTab = async (name) => { await page.$$eval(RESULT, (b, n) => b.find((x) => x.textContent === n).click(), name); await settle(400); };
 const drag = async (from, to) => {
   await page.mouse.move(from[0], from[1]);
   await page.mouse.down();
@@ -77,10 +79,10 @@ await cmd('extrude');
 await settle(500);
 check('the title is the feature’s name', (await page.$eval('[data-testid=dialog] h3', (e) => e.textContent)) === 'Extrude 1');
 check('a first feature is New', (await tabOn()) === 'New', `${await tabOn()}`);
-const tabLabels = await page.$$eval('.dialog-tabs button', (b) => b.map((x) => [x.textContent, x.disabled]));
+const tabLabels = await page.$$eval(RESULT, (b) => b.map((x) => [x.textContent, x.disabled]));
 check('all four results are there', tabLabels.map((t) => t[0]).join() === 'New,Add,Remove,Intersect', JSON.stringify(tabLabels));
 check('and a first feature can’t choose Remove', tabLabels.filter((t) => t[1]).map((t) => t[0]).join() === 'Add,Remove,Intersect', JSON.stringify(tabLabels));
-await page.$$eval('.dialog-tabs button', (b) => b.find((x) => x.textContent === 'Remove').click());
+await page.$$eval(RESULT, (b) => b.find((x) => x.textContent === 'Remove').click());
 await settle(200);
 check('clicking it does nothing', (await tabOn()) === 'New' && near((await state()).volume, AREA * 20));
 check('the box shows the pick as a row', (await page.$eval('.pick-name', (e) => e.textContent)) === 'All of Sketch 1');
@@ -413,7 +415,7 @@ await clickRow('Top');
 await cmd('extrude');
 await settle(500);
 check('with a solid, Add is the default', (await tabOn()) === 'Add', `${await tabOn()}`);
-const enabled = await page.$$eval('.dialog-tabs button', (b) => b.every((x) => !x.disabled));
+const enabled = await page.$$eval(RESULT, (b) => b.every((x) => !x.disabled));
 check('and all four are open', enabled);
 await typeInto('length', '10');
 s = await state();
@@ -446,7 +448,7 @@ await page.keyboard.press('1');
 await wait(450);
 await cmd('extrude');
 await settle(300);
-check('the box asks for regions', (await page.$eval('.pick-prompt', (e) => e.textContent)) === 'Click regions in the view');
+check('the box asks for faces or regions', (await page.$eval('.pick-prompt', (e) => e.textContent)) === 'Click flat faces or regions in the view');
 const click3d = async (x, y) => {
   const p = await page.evaluate((x, y) => {
     const b = document.querySelector('[data-testid=viewport]').getBoundingClientRect();
@@ -526,7 +528,7 @@ await addSketch(rect(50, 0, 10, 10, 1), 'Profile', 0);
 await settle(300);
 await addSketch(rect(50, 0, 6, 6, 1), 'Higher', 40);
 await settle(300);
-for (const id of ['extrude', 'revolve', 'loft', 'fillet', 'chamfer', 'shell', 'draft', 'offset', 'thicken', 'delete-face', 'mirror', 'pattern-linear', 'pattern-circular']) {
+for (const id of ['extrude', 'revolve', 'sweep', 'loft', 'helix', 'fillet', 'chamfer', 'shell', 'draft', 'offset', 'thicken', 'delete-face', 'copy-faces', 'mirror', 'pattern-linear', 'pattern-circular', 'transform', 'delete-bodies', 'fill']) {
   await cmd(id);
   await settle(600);
   const present = !!(await page.$('[data-testid=dialog]'));
@@ -553,8 +555,8 @@ await page.evaluate(async () => {
 await settle(300);
 await cmd('loft');
 await settle(300);
-const sketchBoxes = await page.$$eval('[data-sketch]', (b) => b.map((x) => x.dataset.sketch));
-for (const id of sketchBoxes.slice(-2)) { await page.$eval(`[data-sketch="${id}"]`, (e) => e.click()); await settle(250); }
+const sketchRows = await page.evaluate(() => window.schmishape.doc.features.filter((f) => f.name === 'A' || f.name === 'B').map((f) => f.id));
+for (const id of sketchRows) { await page.$eval(`.feature-row[data-feature="${id}"]`, (e) => e.click()); await settle(250); }
 await clickTab('New');
 s = await state();
 check('a loft can be New', s.valid && !s.failed && s.parts >= 2, JSON.stringify(s));

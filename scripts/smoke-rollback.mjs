@@ -123,7 +123,7 @@ await settle(150);
 const FULL = PLATE + BOSS + TOP;
 let s = await state();
 check('the part is built', near(s.volume, FULL) && s.rollback === null, `${s.volume} ${s.names.join()}`);
-check('one extrude goes through a hidden copy', (await hiddenCount()) === 1);
+check('no extrude needs a hidden copy of its sketch', (await hiddenCount()) === 0);
 await shot('b01-finished');
 
 console.log('a click only selects');
@@ -199,22 +199,21 @@ check('Enter on a row goes back too', (await state()).barOn === 'Extrude 1' && !
 await page.keyboard.press('Escape');
 await settle(500);
 
-console.log('an extrude with a hidden copy before it');
-const copies = await hiddenCount();
+console.log('an extrude of some of its sketch’s regions');
 await openRow('Extrude 2');
 s = await state();
 check('it goes back to the right feature', s.barOn === 'Extrude 2' && near(s.volume, PLATE + BOSS), `${s.barOn} ${s.volume}`);
 check('the sketch it uses shows its regions', (await regionAt(15, 10, 10)) === 'region');
-await shot('b04-editing-with-copy');
+await shot('b04-editing-some-regions');
 await clickWorld(15, 10, 10);
 await settle(450);
 s = await state();
 check('clicking the other region previews whole sketch', near(s.volume, PLATE + BOSS + 20 * 10 * 5), `${s.volume}`);
-check('that takes the copy away, and the bar stays on the feature', (await hiddenCount()) === copies - 1 && s.barOn === 'Extrude 2', `${await hiddenCount()} ${s.barOn}`);
+check('the bar stays on the feature', (await hiddenCount()) === 0 && s.barOn === 'Extrude 2', `${await hiddenCount()} ${s.barOn}`);
 await clickWorld(15, 10, 10);
 await settle(450);
 s = await state();
-check('clicking it off brings a copy back, and the bar stays', (await hiddenCount()) === copies && s.barOn === 'Extrude 2' && near(s.volume, PLATE + BOSS), `${await hiddenCount()} ${s.barOn} ${s.volume}`);
+check('clicking it off drops it again, and the bar stays', (await hiddenCount()) === 0 && s.barOn === 'Extrude 2' && near(s.volume, PLATE + BOSS), `${await hiddenCount()} ${s.barOn} ${s.volume}`);
 await clickWorld(15, 10, 10);
 await settle(450);
 await accept();
@@ -223,7 +222,7 @@ check('accepted with the copy gone, the bar is back at the end', s.rollback === 
 await page.mouse.move(800, 20);
 await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
 await settle(500);
-check('undo brings the copy back', (await hiddenCount()) === copies && near((await state()).volume, FULL), `${(await state()).volume}`);
+check('undo brings the edit back', (await hiddenCount()) === 0 && near((await state()).volume, FULL), `${(await state()).volume}`);
 
 console.log('with the bar already rolled back');
 await rowMenu('Extrude 2', 'Roll to here');
@@ -418,7 +417,8 @@ check('and the bar still goes all the way back', s.rollback === null && near(s.v
 
 console.log('a feature with no dialog');
 await page.evaluate(async () => {
-  await window.schmishape.mutate('feature_add', { name: 'Moved', feature: { type: 'transform', motion: { type: 'translate', by: [0, 0, 1] }, bodies: ['f2'] } });
+  // Moving between two places has no dialog yet.
+  await window.schmishape.mutate('feature_add', { name: 'Moved', feature: { type: 'transform', motion: { type: 'frames', from: { origin: [0, 0, 0] }, to: { origin: [0, 0, 1] } }, bodies: ['f2'] } });
   await window.schmishape.mutate('feature_add', { name: 'Last sketch', feature: { type: 'constrained_sketch', plane: { origin: [0, 0, 0], z: [0, 0, 1], x: [1, 0, 0] }, sketch: { format: 'coreshape-sketch', version: 1, entities: [], constraints: [] } } });
 });
 await settle(400);

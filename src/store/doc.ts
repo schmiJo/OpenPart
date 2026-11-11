@@ -53,6 +53,8 @@ export const [doc, setDoc] = createStore({
   solid: null as SolidInfo | null,
   rollback: null as number | null,
   env: {} as Record<string, number>,
+  /** What the app keeps with the document: part names and colors, under `parts`, by the kernel's name for each part. */
+  app: {} as Record<string, any>,
   ms: 0,
 });
 
@@ -155,6 +157,17 @@ function rollbackArgs() {
   return doc.rollback !== null ? { upto: doc.rollback } : {};
 }
 
+const GONE_REGION = 'A sketch region this used is gone, because its sketch changed. Edit this feature to pick its regions again.';
+/** The kernel names a region that's gone by its id, which means nothing on screen. */
+function plainRegionErrors(features: any[], summary: any) {
+  for (const step of summary?.features ?? []) {
+    if (!/picked region \S+ isn't in sketch/.test(step.error ?? '')) continue;
+    step.error = GONE_REGION;
+    const f = features.find((x) => x.id === step.id);
+    if (summary.failed && f) summary.failed = `${f.name}: ${GONE_REGION}`;
+  }
+}
+
 async function syncFrom(r: ToolResult | null, t0: number, followed = false): Promise<void> {
   const shown = await engine.call('document_show');
   lastGood = shown.text;
@@ -164,6 +177,7 @@ async function syncFrom(r: ToolResult | null, t0: number, followed = false): Pro
   if (rollback !== doc.rollback) setDoc('rollback', rollback);
   let summary = r && rollback === null ? readSummary(r.text) : null;
   if (!summary) summary = readSummary((await engine.call('rebuild', rollbackArgs())).text);
+  plainRegionErrors(parsed.features ?? [], summary);
   const env = await engine.env();
   const regions = await loadRegions(parsed.features ?? [], env);
   // A revolve follows the line it turns around. Once is enough: after that its axis is where the line is.
@@ -177,6 +191,7 @@ async function syncFrom(r: ToolResult | null, t0: number, followed = false): Pro
   edgesCache = null;
   batch(() => {
     setDoc('parameters', reconcile(parsed.parameters ?? []));
+    setDoc('app', reconcile(parsed.app && typeof parsed.app === 'object' ? parsed.app : {}));
     setDoc('features', reconcile(parsed.features ?? [], { key: 'id' }));
     setDoc('steps', reconcile(summary?.features ?? [], { key: 'id' }));
     setDoc('failed', summary?.failed ? String(summary.failed).replace(/invalid (input|profile): /i, '') : null);
@@ -395,11 +410,31 @@ export async function boot() {
   setBooted(true);
 }
 
+/** How a part looks in the list and the view: a name of its own, and a color, as `#rrggbb`. */
+export interface PartLook { name?: string; color?: string }
+export const partLooks = (): Record<string, PartLook> => (doc.app?.parts && typeof doc.app.parts === 'object' ? doc.app.parts : {});
+
+/**
+ * Names or colors a part. It's kept in the document's own app data, by the kernel's name for the part, which never
+ * changes, so it saves with the file and an AI reading the document sees it too. Empty values go back to the default.
+ */
+export async function setPartLook(body: string, patch: PartLook) {
+  const app = JSON.parse(JSON.stringify(doc.app ?? {}));
+  const parts: Record<string, PartLook> = app.parts && typeof app.parts === 'object' ? app.parts : {};
+  const look: PartLook = { ...parts[body], ...patch };
+  for (const k of Object.keys(look) as (keyof PartLook)[]) if (!look[k]) delete look[k];
+  if (Object.keys(look).length) parts[body] = look;
+  else delete parts[body];
+  if (Object.keys(parts).length) app.parts = parts;
+  else delete app.parts;
+  await commit('app_set', Object.keys(app).length ? { app } : {});
+}
+
 export async function deleteFeature(id: number) {
   const before = lastGood;
   const f = doc.features.find((x) => x.id === id);
   // The kernel would refuse a sketch in use too, but it says so by id.
-  const takesFrom = (x: any) => x.sketch === id || x.sections?.includes(id) || (Array.isArray(x.regions) && x.regions.some((r: any) => r?.sketch === id));
+  const takesFrom = (x: any) => x.sketch === id || (Array.isArray(x.sections) && x.sections.some((s: any) => s === id || s?.sketch === id)) || (Array.isArray(x.regions) && x.regions.some((r: any) => r?.sketch === id));
   const users = doc.features.filter((x) => x.id !== id && takesFrom(x)).map((x) => x.name);
   if (users.length) throw new ToolError(`${f?.name} can't be deleted while ${users.join(', ')} ${users.length === 1 ? 'uses' : 'use'} it.`);
   await mutate('feature_delete', { id });

@@ -141,7 +141,7 @@ function SketchStatus(props: { session: SketchSession }) {
 function SketchTools(props: { session: SketchSession }) {
   const s = () => props.session;
   const toolButton = (t: SketchTool) => (
-    <button class="tool" classList={{ on: s().tool[0]() === t.tool }} aria-label={t.label} data-tip={t.label} data-keys={t.key} aria-pressed={s().tool[0]() === t.tool} onClick={() => s().setTool(t.tool)} data-tool={t.tool}>
+    <button class="tool" classList={{ on: s().tool[0]() === t.tool && !s().constraintTool[0]() }} aria-label={t.label} data-tip={t.label} data-keys={t.key} aria-pressed={s().tool[0]() === t.tool && !s().constraintTool[0]()} onClick={() => s().setTool(t.tool)} data-tool={t.tool}>
       <Icon name={t.icon} />
     </button>
   );
@@ -154,12 +154,15 @@ function SketchTools(props: { session: SketchSession }) {
         <button class="tool" classList={{ held: s().constructing[0]() }} aria-label="Construction geometry" aria-pressed={s().constructing[0]()} data-tip={s().picks().edges.length ? 'Make the selection construction geometry' : 'Draw construction geometry'} data-keys="Q" onClick={() => s().toggleConstruction()} data-tool="construction">
           <Icon name="construction" />
         </button>
+        <button class="tool" aria-label="Use" data-tip="Use: bring the selected part edges into the sketch, still following the part" data-keys="U" disabled={!s().canUse()} onClick={() => s().useSelection()} data-tool="use">
+          <Icon name="use" />
+        </button>
         {toolButton({ tool: 'dimension', icon: 'dimension', label: 'Dimension', key: 'D' })}
       </div>
       <div class="tool-group" role="toolbar" aria-label="Constraints">
         <For each={CONSTRAINTS}>
           {(c) => (
-            <button class="tool" aria-label={c.label} data-tip={c.label} data-keys={c.key} disabled={!s().constraintsFor(c.type)} onClick={() => s().addConstraint(c.type)} data-constraint={c.type}>
+            <button class="tool" classList={{ on: s().constraintTool[0]() === c.type }} aria-label={c.label} aria-pressed={s().constraintTool[0]() === c.type} data-tip={c.label} data-keys={c.key} onClick={() => s().useConstraint(c.type)} data-constraint={c.type}>
               <Icon name={c.icon} />
             </button>
           )}

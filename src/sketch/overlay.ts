@@ -1,12 +1,15 @@
-import { angleOf, arcPoints, circleThrough, dist2, pointsOf, polyline, segPoints, splinePoints, type Con, type Ent, type V2 } from './geometry';
+import { angleOf, arcPoints, circleThrough, dist2, drawn, isProjected, pointsOf, polyline, segPoints, splinePoints, type Con, type Ent, type V2 } from './geometry';
 import { FONT } from '../viewport/font';
 import { dimLabelText, layoutDimension, type DimLayout } from './dimension';
 import { fmt, type SketchSession, type Snap } from './session';
+import { isPartEdge, isPartRef, partIndex } from './parts';
 
 const INK = '#15181B';
 const LOOSE = '#2E6BB0';
 const MARKER = '#D97E00';
 const MARKER_SOFT = '#F0A63C';
+/** Geometry linked to a part: it's fixed, so never loose, and this says where it came from. */
+const LINKED = '#7A4E9E';
 const GLYPH_BG = 'rgba(255,255,255,0.94)';
 const GLYPH_LINE = 'rgba(120,132,144,0.6)';
 
@@ -45,9 +48,10 @@ function strokeEntity(ctx: CanvasRenderingContext2D, s: SketchSession, e: Ent, f
   const pts = polyline(e);
   if (!pts.length) return;
   const on = selected.has(key), over = s.hover === key;
-  ctx.strokeStyle = on ? MARKER : over ? MARKER_SOFT : entityFree(e, free) ? LOOSE : INK;
+  const shown = drawn(e);
+  ctx.strokeStyle = on ? MARKER : over ? MARKER_SOFT : isProjected(e) ? LINKED : entityFree(e, free) ? LOOSE : INK;
   ctx.lineWidth = on || over ? 1.75 : 1.25;
-  ctx.setLineDash(e.construction ? DOTTED : []);
+  ctx.setLineDash(shown.construction ? DOTTED : []);
   path(ctx, s, pts);
   ctx.stroke();
   ctx.setLineDash([]);
@@ -440,11 +444,45 @@ function drawTrim(ctx: CanvasRenderingContext2D, s: SketchSession) {
   ctx.setLineDash([]);
 }
 
+/** A part's corner or edge under the pointer or selected, drawn where it is in the model, not flattened onto the sketch. */
+function drawPartPicks(ctx: CanvasRenderingContext2D, s: SketchSession, selected: Set<string>) {
+  const g = s.part;
+  if (!g) return;
+  const keys = new Set([...selected, ...(s.hover ? [s.hover] : [])].filter(isPartRef));
+  for (const key of keys) {
+    const color = selected.has(key) ? MARKER : MARKER_SOFT;
+    if (isPartEdge(key)) {
+      const e = g.edges[partIndex(key)];
+      if (!e?.pts.length) continue;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      e.pts.forEach((p, i) => {
+        const [x, y] = s.camera.project(p);
+        if (i) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      });
+      ctx.stroke();
+    } else {
+      const c = g.corners[partIndex(key)];
+      if (!c) continue;
+      const [x, y] = s.camera.project(c.p);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.stroke();
+      dot(ctx, x, y, 2.4, color);
+    }
+  }
+}
+
 export function drawSketch(ctx: CanvasRenderingContext2D, s: SketchSession) {
   s.labels = [];
   const selected = new Set(s.selection[0]());
   const free = new Set(s.analysis[0]().free);
   drawRegions(ctx, s);
+  drawPartPicks(ctx, s, selected);
   drawOrigin(ctx, s, selected);
   for (const e of s.data.entities) strokeEntity(ctx, s, e, free, selected);
   // Selecting a point shows its coincident constraints, so they can be picked and removed.
@@ -470,7 +508,7 @@ export function drawSketch(ctx: CanvasRenderingContext2D, s: SketchSession) {
       const [x, y] = s.screen(p);
       const on = selected.has(ref), over = s.hover === ref;
       const isCenter = ref.endsWith('.center');
-      dot(ctx, x, y, on || over ? 3.2 : isCenter ? 1.6 : 2.1, on ? MARKER : over ? MARKER_SOFT : free.has(ref) ? LOOSE : INK);
+      dot(ctx, x, y, on || over ? 3.2 : isCenter ? 1.6 : 2.1, on ? MARKER : over ? MARKER_SOFT : isProjected(e) ? LINKED : free.has(ref) ? LOOSE : INK);
     }
   }
   drawGlyphs(ctx, s, selected);

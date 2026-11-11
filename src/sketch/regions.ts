@@ -52,8 +52,10 @@ let linesBySketch = new Map<number, SketchLine[]>();
 /** A sketch's straight lines, where its constraints put them. */
 export const sketchLines = (sketchId: number) => linesBySketch.get(sketchId) ?? [];
 
+/** Lines, including a part's straight edges brought into the sketch, which a revolve can turn around too. */
 const readLines = (sketch: any): SketchLine[] =>
   (sketch?.entities ?? [])
+    .map((e: any) => (e.type === 'projected' ? { ...e.geometry, id: e.id, construction: e.construction !== false } : e))
     .filter((e: any) => e.type === 'line' && Array.isArray(e.start) && Array.isArray(e.end))
     .map((e: any) => ({ id: e.id, start: e.start, end: e.end, construction: !!e.construction }));
 
@@ -62,14 +64,17 @@ export async function loadRegions(features: any[], env: Record<string, number>) 
   const next = new Map<string, Solved>();
   const out = new Map<number, SketchRegion[]>();
   const lines = new Map<number, SketchLine[]>();
-  for (const f of features) {
+  for (const [position, f] of features.entries()) {
     if (f.type !== 'constrained_sketch' || (f.name ?? '').startsWith('~')) continue;
+    // Geometry projected from a part depends on the parts before the sketch, so those sketches are never taken from the cache.
+    const linked = (f.sketch?.entities ?? []).some((e: any) => e.type === 'projected');
+    const where = linked ? { context: { plane: f.plane, position } } : {};
     const key = JSON.stringify([f.sketch, env]);
-    let got = known.get(key);
+    let got = linked ? undefined : known.get(key);
     if (!got) {
-      const solved = await engine.call('sketch_solve', { sketch: f.sketch, parameters: env });
+      const solved = await engine.call('sketch_solve', { sketch: f.sketch, parameters: env, ...where });
       const sketch = solved.ok ? JSON.parse(solved.text).sketch : f.sketch;
-      const r = await engine.call('sketch_arrangement', { sketch });
+      const r = await engine.call('sketch_arrangement', { sketch, ...where });
       got = { regions: r.ok ? (JSON.parse(r.text).regions as any[]).map(readRegion) : [], lines: readLines(sketch) };
     }
     next.set(key, got);

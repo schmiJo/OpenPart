@@ -2,9 +2,10 @@ import { createEffect, createSignal, onCleanup, Show } from 'solid-js';
 import { busy, doc, stopEngine } from '../store/doc';
 import { glProblem, hoverText, mode } from '../store/ui';
 import { session } from '../sketch/controller';
+import { CONSTRAINT_NEEDS } from '../sketch/session';
 import { asmHint } from '../assembly/interaction';
 import { inAssembly } from '../store/tabs';
-import { activeDef, pickKind, takesRegions } from '../features/dialog';
+import { activeDef, pickKind, regionsTakeFaces } from '../features/dialog';
 import { Icon } from './icons';
 
 const n = (v: number, digits = 2) => v.toLocaleString('en', { maximumFractionDigits: digits });
@@ -13,6 +14,8 @@ function hint() {
   if (glProblem()) return '';
   const s = session();
   if (s) {
+    const waiting = s.constraintTool[0]();
+    if (waiting) return `${CONSTRAINT_NEEDS[waiting]}: click them, and it's added as soon as they fit. Part corners and edges count too. Esc stops.`;
     switch (s.tool[0]()) {
       case 'select': return 'Drag geometry or a dimension to move it, double-click a dimension to change it. Right-click for Normal to sketch plane.';
       case 'line': return 'Click to start, click to continue. Lines snap to right angles and show an icon. Hold Shift to ignore snaps. Esc ends the chain.';
@@ -32,8 +35,10 @@ function hint() {
   }
   if (mode() === 'pick-plane') return '';
   if (inAssembly()) return asmHint();
+  if (pickKind() === 'regions') return `Click ${regionsTakeFaces() ? 'a flat face or a region' : 'a region'} to add it or drop it, or a sketch in the list for all of it. Right drag rotates, middle drag pans.`;
+  if (pickKind() === 'sections') return 'Click profiles in the order the loft passes through them: regions in the view, or sketches in the list. Right drag rotates, middle drag pans.';
+  if (pickKind() === 'axis') return 'Click a line of the sketch to turn around it. Right drag rotates, middle drag pans.';
   if (pickKind()) return 'Click to pick, click again to drop it, or drag a box. Right drag rotates, middle drag pans.';
-  if (takesRegions()) return 'Click a region to add it or drop it, or a sketch in the list for all of it. Right drag rotates, middle drag pans.';
   if (activeDef()) return 'The preview updates as you type. Dimensions can be expressions, like width / 2.';
   return 'Right drag rotates, middle drag pans, scroll zooms. Click to select, right-click for options, ? for keys.';
 }

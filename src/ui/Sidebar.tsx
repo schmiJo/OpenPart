@@ -1,10 +1,10 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { partLabel } from '../features/words';
-import { cancelDialog, editFeature, pickLimit, pickWholeSketch, takesRegions, values } from '../features/dialog';
+import { activeDef, cancelDialog, editFeature, pickLimit, pickWholeSketch, regionPicksShown, startFeature, takesRegions } from '../features/dialog';
 import { editSketch, finishSketch, normalTo, session, startSketch } from '../sketch/controller';
 import { PLANES } from '../sketch/geometry';
-import { commit, deleteFeature, doc, isHidden, isSketchFeature, mesh, numberOr, setRollback, setSuppressed, type ToolError } from '../store/doc';
-import { clearSelection, geometryHidden, hiddenParts, mode, selectedFeature, selectedGeometry, selectedPart, setHoverPlane, setMode, setSelectedFeature, setSelectedGeometry, setSelectedPart, setSelection, toast, toggleGeometry, togglePart } from '../store/ui';
+import { commit, deleteFeature, doc, isHidden, isSketchFeature, mesh, numberOr, partLooks, setPartLook, setRollback, setSuppressed, type ToolError } from '../store/doc';
+import { renamingPart, setAppearanceFor, setRenamingPart, clearSelection, geometryHidden, hiddenParts, mode, selectedFeature, selectedGeometry, selectedPart, setHoverPlane, setMode, setSelectedFeature, setSelectedGeometry, setSelectedPart, setSelection, toast, toggleGeometry, togglePart } from '../store/ui';
 import { ContextMenu, type MenuItem } from './ContextMenu';
 import { Icon, iconForFeature } from './icons';
 
@@ -204,7 +204,7 @@ export function Features() {
                   class="feature-row"
                   data-index={item.index}
                   data-feature={item.f.id}
-                  classList={{ selected: selectedFeature() === item.f.id || (takesRegions() && ((values.regions ?? []) as { sketch: number }[]).some((r) => r.sketch === item.f.id)), failed: step()?.state === 'failed', off: !!item.f.suppressed || rolledBack(item.index) }}
+                  classList={{ selected: selectedFeature() === item.f.id || (takesRegions() && regionPicksShown().some((r) => r.sketch === item.f.id)), failed: step()?.state === 'failed', off: !!item.f.suppressed || rolledBack(item.index) }}
                   tabIndex={0}
                   data-tip={step()?.state === 'failed' ? step()?.error : undefined}
                   onClick={() => {
@@ -284,9 +284,19 @@ export function Parts() {
   };
   /** Solids, then surfaces, as Onshape lists them, each with its place in the kernel's list for selecting and hiding. */
   const group = (sheet: boolean) => parts().map((p, i) => ({ p, i })).filter((x) => x.p.sheet === sheet);
-  const row = (item: { p: { name: string }; i: number }) => {
-    const name = () => partLabel(parts(), item.p.name);
+  const row = (item: { p: { name: string; sheet: boolean }; i: number }) => {
+    const name = () => partLabel(parts(), item.p.name, partLooks());
     const hidden = () => hiddenParts().has(item.i);
+    const color = () => partLooks()[item.p.name]?.color;
+    const busy = () => !!activeDef() || !!session();
+    const rename = (text: string) => {
+      setRenamingPart(null);
+      const next = text.trim();
+      // Clearing the name, or giving it the default one, goes back to the default.
+      const plain = partLabel(parts(), item.p.name);
+      if (next === name()) return;
+      setPartLook(item.p.name, { name: next === plain ? '' : next }).catch(fail);
+    };
     return (
       <div
         class="geo-row"
@@ -295,14 +305,48 @@ export function Parts() {
         data-body={item.p.name}
         tabIndex={0}
         onClick={() => selectPart(item.i)}
+        onDblClick={() => { if (!busy()) setRenamingPart(item.p.name); }}
         onContextMenu={(e) => {
           e.preventDefault();
           selectPart(item.i);
-          setMenu({ x: e.clientX, y: e.clientY, items: [{ label: hidden() ? 'Show part' : 'Hide part', run: () => togglePart(item.i) }] });
+          setMenu({
+            x: e.clientX,
+            y: e.clientY,
+            items: [
+              { label: 'Rename', disabled: busy(), run: () => setRenamingPart(item.p.name) },
+              {
+                label: 'Edit appearance…',
+                disabled: busy(),
+                // Selected, its faces would be tinted orange, and the color being tried wouldn't show as it is.
+                run: () => { clearSelection(); setSelectedPart(null); setAppearanceFor(item.p.name); },
+              },
+              null,
+              { label: hidden() ? 'Show part' : 'Hide part', run: () => togglePart(item.i) },
+              { label: 'Delete part', disabled: busy(), run: () => void startFeature('delete-bodies') },
+            ],
+          });
         }}
       >
-        <Icon name={(item.p as { sheet?: boolean }).sheet ? 'fill' : 'part'} />
-        <span class="feature-name">{name()}</span>
+        <span class="part-icon" style={color() ? { '--part-color': color() } : undefined} classList={{ tinted: !!color() }}>
+          <Icon name={item.p.sheet ? 'fill' : 'part'} />
+        </span>
+        <Show when={renamingPart() === item.p.name} fallback={<span class="feature-name">{name()}</span>}>
+          <input
+            class="feature-rename"
+            value={name()}
+            aria-label="Part name"
+            spellcheck={false}
+            ref={(el) => queueMicrotask(() => { el.focus(); el.select(); })}
+            onClick={(e) => e.stopPropagation()}
+            onDblClick={(e) => e.stopPropagation()}
+            onBlur={(e) => rename(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') e.currentTarget.blur();
+              if (e.key === 'Escape') { e.currentTarget.value = name(); e.currentTarget.blur(); }
+            }}
+          />
+        </Show>
         <Eye hidden={hidden()} name={name()} toggle={() => togglePart(item.i)} />
       </div>
     );

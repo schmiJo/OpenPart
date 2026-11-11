@@ -3,10 +3,10 @@ import { sameRegions, sketchLines, wholeSketch, type RegionPick } from '../sketc
 import { doc, isHidden, numberOr, sketchRegions } from '../store/doc';
 
 export type FieldKind =
-  | 'expr' | 'segment' | 'tabs' | 'check' | 'group' | 'select' | 'sketch' | 'sketches' | 'steps'
-  | 'edges' | 'faces' | 'face' | 'part' | 'parts' | 'vertex' | 'regions' | 'axis';
+  | 'expr' | 'segment' | 'tabs' | 'check' | 'group' | 'select' | 'sketch' | 'steps'
+  | 'edges' | 'faces' | 'face' | 'part' | 'parts' | 'vertex' | 'regions' | 'sections' | 'axis';
 /** Fields filled by clicking in the view. One at a time takes the clicks, as in Onshape. */
-export const PICK_KINDS = new Set<FieldKind>(['edges', 'faces', 'face', 'part', 'parts', 'vertex', 'regions', 'axis']);
+export const PICK_KINDS = new Set<FieldKind>(['edges', 'faces', 'face', 'part', 'parts', 'vertex', 'regions', 'sections', 'axis']);
 export interface FieldDef {
   key: string;
   label: string;
@@ -28,6 +28,8 @@ export interface FieldDef {
   checkable?: boolean;
   /** Takes the dialog's whole width, with its label only for screen readers, as Onshape's Result row does. */
   bare?: boolean;
+  /** For regions: a part's flat faces can go in too, as extrude takes them. */
+  takesFaces?: boolean;
 }
 export type Values = Record<string, any>;
 
@@ -125,23 +127,36 @@ const point = (v: Values, keys: [string, string, string]) => keys.map((k) => num
 const isOrigin = (p: unknown[]) => p.every((c) => c === 0);
 
 const picks = (v: Values) => (v.regions ?? []) as RegionPick[];
-/** Whether something is picked. A sketch with no regions on record stays chosen, for the kernel to say why it can't build. */
-export const regionsChosen = (v: Values) => picks(v).length > 0 || (v.sketch !== null && v.sketch !== undefined && !sketchRegions().get(Number(v.sketch))?.length);
+/** A part's flat faces, picked in the same box as regions, as Onshape's Extrude takes them. */
+const pickedFaces = (v: Values) => (v.faces ?? []) as string[];
+/**
+ * Whether something is picked: regions, faces, or a sketch with no regions on record, which stays chosen for the kernel
+ * to say why it can't build.
+ */
+export const regionsChosen = (v: Values) =>
+  picks(v).length > 0 || pickedFaces(v).length > 0 || (v.sketch !== null && v.sketch !== undefined && !sketchRegions().get(Number(v.sketch))?.length);
 
 /**
  * The sketch and regions an extrude takes. All of one sketch is just that sketch, so it keeps up as regions come and go.
  * Anything else lists them: plainly for the first sketch, and with their sketch for the others.
  */
-function regionsJson(v: Values): { sketch: number; regions?: unknown[] } {
+function regionsJson(v: Values): { sketch?: number; regions?: unknown[] } {
   const list = picks(v);
-  if (!list.length) return { sketch: Number(v.sketch) };
+  // Faces alone need no sketch at all.
+  if (!list.length) return v.sketch === null || v.sketch === undefined || pickedFaces(v).length ? {} : { sketch: Number(v.sketch) };
   const first = list[0].sketch;
   if (list.every((p) => p.sketch === first) && sameRegions(list.map((p) => p.id), wholeSketch(sketchRegions().get(first)))) return { sketch: first };
   return { sketch: first, regions: list.map((p) => (p.sketch === first ? p.id : { sketch: p.sketch, region: p.id })) };
 }
 
 /** What an extrude takes, as the dialog picks it. Regions that have gone from their sketch are left for picking again. */
-function readRegions(f: any): { sketch: number; regions: RegionPick[] } {
+function readRegions(f: any): { sketch: number | null; regions: RegionPick[]; faces: string[] } {
+  const faces = Array.isArray(f.faces) ? [...f.faces] : [];
+  if (f.sketch === undefined) return { sketch: null, regions: [], faces };
+  return { ...readSketchRegions(f), faces };
+}
+
+function readSketchRegions(f: any): { sketch: number; regions: RegionPick[] } {
   const there = (p: RegionPick) => (sketchRegions().get(p.sketch) ?? []).some((r) => r.id === p.id);
   if (Array.isArray(f.regions) && f.regions.length) {
     const list = f.regions.map((r: any): RegionPick => (typeof r === 'string' ? { sketch: f.sketch, id: r } : { sketch: r.sketch, id: r.region }));
@@ -267,6 +282,12 @@ function readAxis(f: any): { axis: string; customAxis?: unknown } {
   return line ? { axis: `line:${line.id}` } : { axis: 'custom', customAxis: f.axis };
 }
 
+/** One profile of a loft: a whole sketch holding one outline, or one region of a sketch. */
+export interface Section { sketch: number; id?: string }
+/** A region that's all of its sketch is written as the sketch, as lofts always were. */
+const sectionJson = (s: Section) => (!s.id || sameRegions([s.id], wholeSketch(sketchRegions().get(s.sketch))) ? s.sketch : { sketch: s.sketch, region: s.id });
+const readSection = (s: any): Section => (typeof s === 'number' ? { sketch: s } : { sketch: s.sketch, id: s.region });
+
 /** One step of a sweep's path, as the dialog edits it. */
 export interface PathStep { kind: 'line' | 'bend'; length: string; radius: string; degrees: string; toward: string }
 export const newStep = (kind: PathStep['kind']): PathStep => ({ kind, length: '30', radius: '20', degrees: '90', toward: '0' });
@@ -295,7 +316,7 @@ export const DEFS: FeatureDef[] = [
     fields: [
       CREATION,
       MODE,
-      { key: 'regions', label: 'Sketch regions to extrude', kind: 'regions' },
+      { key: 'regions', label: 'Faces and sketch regions to extrude', kind: 'regions', takesFaces: true },
       {
         key: 'end',
         label: 'End type',
@@ -311,15 +332,15 @@ export const DEFS: FeatureDef[] = [
       { key: 'offsetOn', label: 'Starting offset', kind: 'group', checkable: true, fields: [{ ...dim('offset', 'Offset'), scrub: 0.5 }] },
       { key: 'secondOn', label: 'Second end position', kind: 'group', checkable: true, when: blind, disabled: (v) => !!v.symmetric, fields: [dim('second', 'Depth')] },
     ],
-    defaults: () => ({ sketch: null, regions: [], length: '20', mode: 'add', body: 'solid', ...EXTRUDE_OPTIONS }),
+    defaults: () => ({ sketch: null, regions: [], faces: [], length: '20', mode: 'add', body: 'solid', ...EXTRUDE_OPTIONS }),
     missing(v) {
-      if (!regionsChosen(v)) return 'Click regions in the view';
+      if (!regionsChosen(v)) return 'Click faces or regions in the view';
       if (endJson(v) === null) return `Click ${endType(v) === 'up_to_vertex' ? 'near the end of an edge' : 'a face'} to stop at`;
       return null;
     },
     make(v) {
       if (this.missing!(v)) return null;
-      const out: any = { type: 'extrude', ...regionsJson(v), mode: modeOf(v) };
+      const out: any = { type: 'extrude', ...regionsJson(v), ...(pickedFaces(v).length ? { faces: pickedFaces(v) } : {}), mode: modeOf(v) };
       const offset = v.offsetOn ? num(v.offset) : 0;
       if (!blind(v)) Object.assign(out, { start: offset, length: num(v.length), end: endJson(v), opposite: !!v.flip });
       // A feature from a file or an AI can be flipped the kernel's way, which names its end faces the other way round.
@@ -341,18 +362,22 @@ export const DEFS: FeatureDef[] = [
     fields: [
       CREATION,
       MODE,
-      { key: 'sketch', label: 'Sketch', kind: 'sketch' },
-      { key: 'axis', label: 'Revolve axis', kind: 'axis', hint: 'Click a line of the sketch, or choose one.' },
+      { key: 'regions', label: 'Sketch regions to revolve', kind: 'regions' },
+      { key: 'axis', label: 'Revolve axis', kind: 'axis', hint: 'Click a line of the first region’s sketch, or choose one.' },
       angle('degrees', 'Angle'),
     ],
-    defaults: () => ({ sketch: lastSketchId(), axis: AXIS_CHOICES.y, degrees: '360', mode: 'add', body: 'solid' }),
-    missing: (v) => (v.sketch === null || v.sketch === undefined ? 'Choose a sketch' : axisJson(Number(v.sketch), v.axis, v.customAxis) === null ? 'Choose an axis' : null),
+    // The last sketch, all of it, as before regions could be picked: the usual revolve is of a sketch just drawn.
+    defaults: () => {
+      const sketch = lastSketchId();
+      return { sketch, regions: sketch === null ? [] : wholeSketch(sketchRegions().get(sketch)).map((id) => ({ sketch, id })), faces: [], axis: AXIS_CHOICES.y, degrees: '360', mode: 'add', body: 'solid' };
+    },
+    missing: (v) => (!regionsChosen(v) ? 'Click regions in the view' : axisJson(Number(v.sketch), v.axis, v.customAxis) === null ? 'Choose an axis' : null),
     make(v) {
       if (this.missing!(v)) return null;
       const axis = axisJson(Number(v.sketch), v.axis, v.customAxis);
-      return { type: 'revolve', sketch: Number(v.sketch), degrees: num(v.degrees), mode: modeOf(v), ...(axis ? { axis } : {}), app: { ...v.otherApp, axis: v.axis } };
+      return { type: 'revolve', ...regionsJson(v), degrees: num(v.degrees), mode: modeOf(v), ...(axis ? { axis } : {}), app: { ...v.otherApp, axis: v.axis } };
     },
-    read: (f) => ({ sketch: f.sketch, degrees: str(f.degrees ?? 360), ...readMode(f), ...readAxis(f), otherApp: readOther(f, 'axis') }),
+    read: (f) => ({ ...readRegions(f), degrees: str(f.degrees ?? 360), ...readMode(f), ...readAxis(f), otherApp: readOther(f, 'axis') }),
   },
   {
     id: 'sweep',
@@ -462,12 +487,12 @@ export const DEFS: FeatureDef[] = [
     fields: [
       CREATION,
       MODE,
-      { key: 'sections', label: 'Sketches', kind: 'sketches', hint: 'Tick them in the order the loft passes through. Each holds one outline.' },
+      { key: 'sections', label: 'Profiles', kind: 'sections', hint: 'In the order the loft passes through them: regions in the view, or sketches in the list.' },
     ],
     defaults: () => ({ sections: [], mode: 'add', body: 'solid' }),
-    missing: (v) => (v.sections.length >= 2 ? null : 'Tick two sketches or more'),
-    make: (v) => (v.sections.length >= 2 ? { type: 'loft', sections: v.sections, mode: modeOf(v) } : null),
-    read: (f) => ({ sections: f.sections ?? [], ...readMode(f) }),
+    missing: (v) => (v.sections.length >= 2 ? null : 'Click two profiles or more'),
+    make: (v) => (v.sections.length >= 2 ? { type: 'loft', sections: (v.sections as Section[]).map(sectionJson), mode: modeOf(v) } : null),
+    read: (f) => ({ sections: (f.sections ?? []).map(readSection), ...readMode(f) }),
   },
   {
     id: 'draft',
